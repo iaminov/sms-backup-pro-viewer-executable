@@ -9,6 +9,8 @@ function MergeBackupsModal({ onClose }) {
   const [outputFile, setOutputFile] = useState('')
   const [includeMedia, setIncludeMedia] = useState(true)
   const [normalizeSchema, setNormalizeSchema] = useState(true)
+  const [signalPassphrase, setSignalPassphrase] = useState('')
+  const [showSignalPassphrase, setShowSignalPassphrase] = useState(false)
 
   const [browsingFolder, setBrowsingFolder] = useState(false)
   const [browsingSave, setBrowsingSave] = useState(false)
@@ -112,7 +114,8 @@ function MergeBackupsModal({ onClose }) {
         source_folder: sourceFolder.trim(),
         output_file: outputFile.trim(),
         include_media: includeMedia,
-        normalize_schema: normalizeSchema
+        normalize_schema: normalizeSchema,
+        signal_passphrase: signalPassphrase.trim()
       }
       await axios.post(`${API_BASE}/merge-backups`, payload)
       startPolling()
@@ -155,7 +158,7 @@ function MergeBackupsModal({ onClose }) {
       </Modal.Header>
       <Modal.Body>
         <p className="text-muted small mb-3">
-          Recursively scans any folder and all its subfolders for both extracted (<code>.xml</code>) and compressed (<code>.zip</code>) SMS Backup &amp; Restore files, eliminating all duplicate messages, normalizing schema changes, and sorting chronologically into one unified XML file.
+          Recursively scans any folder and all its subfolders for extracted (<code>.xml</code>), compressed (<code>.zip</code>), and encrypted Signal (<code>.backup</code>) files, eliminating all duplicate messages, normalizing schema changes, and sorting chronologically into one unified XML file.
         </p>
 
         {error && (
@@ -274,6 +277,32 @@ function MergeBackupsModal({ onClose }) {
             </div>
             <Form.Text className="text-muted">
               The single, unified XML file created after merging and deduplicating.
+            </Form.Text>
+          </Form.Group>
+
+          {/* Signal Backup Passphrase */}
+          <Form.Group className="mb-3">
+            <Form.Label className="fw-semibold d-flex justify-content-between align-items-center">
+              <span>Signal Backup Passphrase <span className="text-muted fw-normal small">(Optional, for <code>.backup</code> files)</span></span>
+              <Button
+                variant="link"
+                size="sm"
+                className="p-0 text-decoration-none"
+                onClick={() => setShowSignalPassphrase(!showSignalPassphrase)}
+              >
+                {showSignalPassphrase ? 'Hide' : 'Show'}
+              </Button>
+            </Form.Label>
+            <Form.Control
+              type={showSignalPassphrase ? 'text' : 'password'}
+              placeholder="e.g. 31889 30544 62782 17192 51469 48815"
+              value={signalPassphrase}
+              onChange={(e) => setSignalPassphrase(e.target.value)}
+              disabled={merging}
+              autoComplete="off"
+            />
+            <Form.Text className="text-muted">
+              Enter the 30-digit passphrase used when creating your Signal Android backup. If present in your selected directory, Signal backups will be decrypted, converted to standard SMS/MMS, and merged chronologically with duplicates removed.
             </Form.Text>
           </Form.Group>
 

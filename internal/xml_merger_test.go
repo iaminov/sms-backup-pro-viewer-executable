@@ -204,3 +204,75 @@ func TestMergeBackups(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeWithSignalBackup(t *testing.T) {
+	sigPath := "../signal-2022-11-10-02-00-00.backup"
+	if _, err := os.Stat(sigPath); os.IsNotExist(err) {
+		t.Skip("Signal backup file not found, skipping test")
+	}
+
+	tempDir, err := os.MkdirTemp("", "sbv_test_merge_sig_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create an XML backup in subfolder
+	xmlContent := `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<smses count="2">
+  <sms protocol="0" address="+15551234567" date="1000000000" type="1" subject="null" body="Ancient SMS" toa="null" sc_toa="null" service_center="null" read="1" status="-1" locked="0" />
+  <sms protocol="0" address="+19175151180" date="1647708969291" type="2" subject="null" body="yo what's good" toa="null" sc_toa="null" service_center="null" read="1" status="-1" locked="0" />
+</smses>`
+	xmlPath := filepath.Join(tempDir, "sms-backup.xml")
+	if err := os.WriteFile(xmlPath, []byte(xmlContent), 0644); err != nil {
+		t.Fatalf("Failed to write test xml: %v", err)
+	}
+
+	// Copy Signal backup into tempDir
+	destSig := filepath.Join(tempDir, "signal.backup")
+	inF, err := os.Open(sigPath)
+	if err != nil {
+		t.Fatalf("Failed to open source signal backup: %v", err)
+	}
+	defer inF.Close()
+	outF, err := os.Create(destSig)
+	if err != nil {
+		t.Fatalf("Failed to create dest signal backup: %v", err)
+	}
+	io.Copy(outF, inF)
+	outF.Close()
+
+	outputPath := filepath.Join(tempDir, "merged_with_signal.xml")
+	opts := MergeOptions{
+		SourceFolder:     tempDir,
+		OutputFile:       outputPath,
+		IncludeMedia:     false,
+		NormalizeSchema:  true,
+		SignalPassphrase: "31889 30544 62782 17192 51469 48815",
+	}
+
+	prog, err := MergeBackupsToSingleXML(opts)
+	if err != nil {
+		t.Fatalf("MergeBackupsToSingleXML with Signal failed: %v", err)
+	}
+
+	t.Logf("Merge with Signal result: TotalFound=%d, Unique=%d, DuplicatesRemoved=%d",
+		prog.TotalFoundMessages, prog.UniqueMessages, prog.DuplicatesRemoved)
+
+	// In Signal backup: 2866 SMS + 192 MMS = 3058 messages
+	// In XML: 2 messages (one is duplicate "yo what's good" with date 1647708969291)
+	// TotalFound should be 3058 + 2 = 3060
+	// DuplicatesRemoved should be at least 1
+	if prog.TotalFoundMessages < 3000 {
+		t.Errorf("Expected >3000 total found messages, got %d", prog.TotalFoundMessages)
+	}
+	if prog.DuplicatesRemoved < 1 {
+		t.Errorf("Expected duplicate 'yo what's good' to be removed, but DuplicatesRemoved=%d", prog.DuplicatesRemoved)
+	}
+
+	// Check output file exists and is valid XML
+	outInfo, err := os.Stat(outputPath)
+	if err != nil || outInfo.Size() == 0 {
+		t.Fatalf("Merged output file is empty or missing: %v", err)
+	}
+}

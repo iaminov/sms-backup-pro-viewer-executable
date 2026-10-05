@@ -26,10 +26,11 @@ import (
 )
 
 type MergeOptions struct {
-	SourceFolder    string `json:"source_folder"`
-	OutputFile      string `json:"output_file"`
-	IncludeMedia    bool   `json:"include_media"`
-	NormalizeSchema bool   `json:"normalize_schema"`
+	SourceFolder     string `json:"source_folder"`
+	OutputFile       string `json:"output_file"`
+	IncludeMedia     bool   `json:"include_media"`
+	NormalizeSchema  bool   `json:"normalize_schema"`
+	SignalPassphrase string `json:"signal_passphrase"`
 }
 
 type MergeProgress struct {
@@ -81,7 +82,7 @@ func DiscoverBackupFiles(root string) ([]string, error) {
 			return nil
 		}
 		lower := strings.ToLower(path)
-		if strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".zip") {
+		if strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".backup") {
 			files = append(files, path)
 		}
 		return nil
@@ -384,7 +385,7 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 		return nil, fmt.Errorf("failed to scan directory: %w", err)
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no .xml or .zip backup files found in: %s", opts.SourceFolder)
+		return nil, fmt.Errorf("no .xml, .zip, or .backup files found in: %s", opts.SourceFolder)
 	}
 
 	sortFilesChronologically(files)
@@ -534,7 +535,97 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 			return nil
 		}
 
-		if strings.HasSuffix(strings.ToLower(filePath), ".zip") {
+		if strings.HasSuffix(strings.ToLower(filePath), ".backup") {
+			if strings.TrimSpace(opts.SignalPassphrase) == "" {
+				return nil, fmt.Errorf("file %s is an encrypted Signal backup, but no passphrase was provided", fileName)
+			}
+			_, _, err := DecodeSignalBackup(
+				filePath,
+				opts.SignalPassphrase,
+				opts.IncludeMedia,
+				func(sms *SMSEntry, dateMs int64) error {
+					totalFound++
+					var attrs []xml.Attr
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "protocol"}, Value: sms.Protocol})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "address"}, Value: sms.Address})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "date"}, Value: sms.Date})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "type"}, Value: sms.Type})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "subject"}, Value: sms.Subject})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "body"}, Value: sms.Body})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "toa"}, Value: sms.TOA})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "sc_toa"}, Value: sms.SCTOA})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "service_center"}, Value: sms.ServiceCenter})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "read"}, Value: sms.Read})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "status"}, Value: sms.Status})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "locked"}, Value: "0"})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "date_sent"}, Value: sms.Date})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "sub_id"}, Value: sms.SubID})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "readable_date"}, Value: sms.ReadableDate})
+					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "contact_name"}, Value: sms.ContactName})
+
+					key := computeSMSDedupKey(sms.Address, sms.Date, sms.Type, sms.Body)
+					xmlBytes := formatNormalizedSMS(attrs, smsSchema, dateMs)
+					richness := 1
+					if sms.Body != "" {
+						richness += 10
+					}
+					_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
+					txCount++
+					if txCount >= 2000 {
+						_ = tx.Commit()
+						tx, _ = db.Begin()
+						txCount = 0
+					}
+					return nil
+				},
+				func(mms *MMSEntry, dateMs int64) error {
+					totalFound++
+					key := computeMMSDedupKey(mms)
+					startElem := xml.StartElement{
+						Name: xml.Name{Local: "mms"},
+						Attr: []xml.Attr{
+							{Name: xml.Name{Local: "date"}, Value: mms.Date},
+							{Name: xml.Name{Local: "msg_box"}, Value: mms.Type},
+							{Name: xml.Name{Local: "read"}, Value: mms.Read},
+							{Name: xml.Name{Local: "thread_id"}, Value: mms.ThreadID},
+							{Name: xml.Name{Local: "sub"}, Value: mms.Subject},
+							{Name: xml.Name{Local: "tr_id"}, Value: mms.TrID},
+							{Name: xml.Name{Local: "ct_t"}, Value: mms.ContentType},
+							{Name: xml.Name{Local: "rr"}, Value: mms.ReadReport},
+							{Name: xml.Name{Local: "read_status"}, Value: mms.ReadStatus},
+							{Name: xml.Name{Local: "m_id"}, Value: mms.MessageID},
+							{Name: xml.Name{Local: "m_size"}, Value: mms.MessageSize},
+							{Name: xml.Name{Local: "m_type"}, Value: mms.MessageType},
+							{Name: xml.Name{Local: "sim_slot"}, Value: mms.SimSlot},
+							{Name: xml.Name{Local: "readable_date"}, Value: mms.ReadableDate},
+							{Name: xml.Name{Local: "contact_name"}, Value: mms.ContactName},
+							{Name: xml.Name{Local: "address"}, Value: mms.Address},
+							{Name: xml.Name{Local: "body"}, Value: mms.Body},
+						},
+					}
+					xmlBytes := formatNormalizedMMS(&startElem, mms, opts.IncludeMedia)
+					richness := 50
+					if opts.IncludeMedia {
+						for _, p := range mms.Parts {
+							if p.Data != "" && p.Data != "null" {
+								richness += 100
+							}
+						}
+					}
+					_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
+					txCount++
+					if txCount >= 2000 {
+						_ = tx.Commit()
+						tx, _ = db.Begin()
+						txCount = 0
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("error processing Signal backup %s: %w", fileName, err)
+			}
+		} else if strings.HasSuffix(strings.ToLower(filePath), ".zip") {
 			zReader, err := zip.OpenReader(filePath)
 			if err == nil {
 				for _, zFile := range zReader.File {

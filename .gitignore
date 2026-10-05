@@ -32,3 +32,5 @@ frontend/.env
 ._.DS_Store
 .vscode/
 .idea/
+
+scratch/
