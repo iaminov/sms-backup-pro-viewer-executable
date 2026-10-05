@@ -11,14 +11,14 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 // Color palette
 const COLORS = ['#0d6efd', '#198754', '#ffc107', '#dc3545', '#6c757d', '#0dcaf0', '#6610f2', '#d63384']
 
-function Summary({ startDate, endDate }) {
+function Summary({ startDate, endDate, account }) {
   const [analytics, setAnalytics] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     fetchAnalytics()
-  }, [startDate, endDate])
+  }, [startDate, endDate, account])
 
   const fetchAnalytics = async () => {
     setLoading(true)
@@ -27,6 +27,7 @@ function Summary({ startDate, endDate }) {
       const params = {}
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (account && account !== 'all') params.account = account
       params.tz_offset = -new Date().getTimezoneOffset()
 
       const response = await axios.get(`${API_BASE}/analytics`, { params })
@@ -126,6 +127,14 @@ function Summary({ startDate, endDate }) {
       </div>
 
       <div className="flex-fill overflow-auto p-3">
+        {account && account !== 'all' && (
+          <div className="alert alert-primary py-2 px-3 mb-3 d-flex align-items-center justify-content-between shadow-sm">
+            <div className="d-flex align-items-center gap-2">
+              <span className="badge bg-primary">Segregated Account</span>
+              <span>Showing statistics for phone number: <strong>{formatPhoneNumber(account)}</strong></span>
+            </div>
+          </div>
+        )}
         {/* Summary Stats Cards */}
         <div className="row g-3 mb-4">
           <div className="col-6 col-md-3">

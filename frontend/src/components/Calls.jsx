@@ -4,7 +4,7 @@ import axios from 'axios'
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const PAGE_SIZE = 50
 
-function Calls({ startDate, endDate }) {
+function Calls({ startDate, endDate, account }) {
   const [calls, setCalls] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -19,7 +19,7 @@ function Calls({ startDate, endDate }) {
     setOffset(0)
     setHasMore(true)
     fetchCalls(0, false)
-  }, [startDate, endDate])
+  }, [startDate, endDate, account])
 
   const fetchCalls = async (currentOffset, append = false) => {
     if (append) {
@@ -35,6 +35,7 @@ function Calls({ startDate, endDate }) {
       }
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (account && account !== 'all') params.account = account
 
       const response = await axios.get(`${API_BASE}/calls`, { params })
       const newCalls = response.data || []

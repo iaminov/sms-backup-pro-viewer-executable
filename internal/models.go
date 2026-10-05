@@ -31,6 +31,7 @@ type Message struct {
 	MessageType int      `json:"message_type,omitempty"` // m_type field
 	SimSlot     int      `json:"sim_slot,omitempty"`
 	Addresses   []string `json:"addresses,omitempty"` // All phone numbers in conversation (for MMS)
+	Account     string   `json:"account,omitempty"`   // Phone number / device account this message belongs to
 }
 
 type CallLog struct {
@@ -42,6 +43,14 @@ type CallLog struct {
 	Presentation   int       `json:"presentation,omitempty"` // 1 = allowed, 2 = restricted, 3 = unknown, 4 = payphone
 	SubscriptionID string    `json:"subscription_id,omitempty"`
 	ContactName    string    `json:"contact_name,omitempty"`
+	Account        string    `json:"account,omitempty"` // Phone number / device account this call belongs to
+}
+
+type AccountInfo struct {
+	Account      string `json:"account"`       // E.164 phone number, e.g. "+16462447741"
+	Formatted    string `json:"formatted"`     // Human friendly, e.g. "+1 (646) 244-7741"
+	MessageCount int    `json:"message_count"`
+	CallCount    int    `json:"call_count"`
 }
 
 type Conversation struct {

@@ -13,6 +13,7 @@ This project integrates the interactive web interface and SQLite indexing of **[
 - **Universal XML & ZIP Support Across All Features**:
   - Every feature—Conversation Viewer, Media Extractor, Auto-Import, and Backup Merger—seamlessly accepts both raw `.xml` files and compressed `.zip` (`.xml.zip`) archives directly, without requiring manual decompression beforehand.
 - **Interactive Conversation Viewer with Media Loading Toggle**:
+  - **Account & Phone Number Segregation**: When importing backups from multiple phones or SIMs—or when merging without phone number normalization—SBV tags messages and call logs with originating phone account numbers (`account` attribute). An **Account Selector** dropdown in the navigation bar lets you seamlessly isolate and switch between accounts (e.g. `📱 Account 1: +1 (646)...` vs `📱 Account 2: +1 (917)...` vs `📱 All Accounts`), segregating conversation lists, message threads, calls, activity streams, and the entire analytics summary per number.
   - **Load Media Toggle**: Switch between loading media attachments or importing text-only. When disabled, skips heavy base64 media decoding to drastically accelerate import speed and save disk space, while keeping all messages, calls, and contact threads 100% intact.
   - Full-text search with SQLite FTS5.
   - Chronological conversation threads and group MMS support.
@@ -53,11 +54,12 @@ This project integrates the interactive web interface and SQLite indexing of **[
 
 ## How to Use
 
-### 1. Viewing Conversations
+### 1. Viewing Conversations & Segregating Accounts
 - In the top navigation bar, click **Upload Backup**.
 - Drag and drop or select one or more `.xml` or `.zip` (`.xml.zip`) backup files.
 - **Load Media Toggle**: Toggle whether to load photos, videos, and audio attachments into conversation threads, or keep it off for a lightning-fast, lightweight text-only import.
 - Click **Upload** and wait for processing to complete.
+- **Account Selector**: If your backup contains multiple phone numbers (or if you merged without normalizing), an Account dropdown appears in the view bar. Select `📱 All Accounts` for a consolidated view or choose any specific phone number to instantly segregate conversations, call logs, activity streams, full-text searches, and the Summary dashboard by that account.
 - Browse conversation threads, search messages, view call records, and filter by date.
 
 ### 2. Extracting Media Attachments to Folders

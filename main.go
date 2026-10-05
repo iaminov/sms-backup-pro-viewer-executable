@@ -177,6 +177,7 @@ func main() {
 	protected.GET("/activity", internal.HandleActivity)
 	protected.GET("/calls", internal.HandleCalls)
 	protected.GET("/daterange", internal.HandleDateRange)
+	protected.GET("/accounts", internal.HandleGetAccounts)
 	protected.GET("/progress", internal.HandleProgress)
 	protected.GET("/media", internal.HandleMedia)
 	protected.GET("/media-items", internal.HandleMediaItems)

@@ -29,6 +29,7 @@ type SMSBackup struct {
 }
 
 type SMSEntry struct {
+	Account       string `xml:"account,attr"`
 	Address       string `xml:"address,attr"`
 	Date          string `xml:"date,attr"`
 	Type          string `xml:"type,attr"`
@@ -47,6 +48,7 @@ type SMSEntry struct {
 }
 
 type MMSEntry struct {
+	Account      string    `xml:"account,attr"`
 	Address      string    `xml:"address,attr"`
 	Date         string    `xml:"date,attr"`
 	Type         string    `xml:"msg_box,attr"`
@@ -85,6 +87,7 @@ type MMSAddr struct {
 }
 
 type CallEntry struct {
+	Account        string `xml:"account,attr"`
 	Number         string `xml:"number,attr"`
 	Duration       string `xml:"duration,attr"`
 	Date           string `xml:"date,attr"`
@@ -147,7 +150,7 @@ func ParseSMSBackup(r io.Reader, loadMediaOpt ...bool) (ParseResult, error) {
 	return result, nil
 }
 
-func convertSMSEntry(sms SMSEntry) (Message, error) {
+func convertSMSEntry(sms SMSEntry, defaultAccount ...string) (Message, error) {
 	dateMs, err := strconv.ParseInt(sms.Date, 10, 64)
 	if err != nil {
 		return Message{}, err
@@ -159,6 +162,14 @@ func convertSMSEntry(sms SMSEntry) (Message, error) {
 	protocol, _ := strconv.Atoi(sms.Protocol)
 	status, _ := strconv.Atoi(sms.Status)
 	subID, _ := strconv.Atoi(sms.SubID)
+
+	account := sms.Account
+	if account == "" && len(defaultAccount) > 0 {
+		account = defaultAccount[0]
+	}
+	if account != "" {
+		account = normalizePhoneNumber(account)
+	}
 
 	// Normalize the phone number to remove formatting differences
 	normalizedAddress := normalizePhoneNumber(sms.Address)
@@ -190,13 +201,17 @@ func convertSMSEntry(sms SMSEntry) (Message, error) {
 		ContactName:   sms.ContactName,
 		Sender:        sender,
 		Addresses:     addresses,
+		Account:       account,
 	}, nil
 }
 
-func convertMMSEntry(mms MMSEntry, loadMediaOpt ...bool) (Message, error) {
-	loadMedia := true
-	if len(loadMediaOpt) > 0 {
-		loadMedia = loadMediaOpt[0]
+func convertMMSEntry(mms MMSEntry, loadMedia bool, defaultAccount ...string) (Message, error) {
+	account := mms.Account
+	if account == "" && len(defaultAccount) > 0 {
+		account = defaultAccount[0]
+	}
+	if account != "" {
+		account = normalizePhoneNumber(account)
 	}
 	dateMs, err := strconv.ParseInt(mms.Date, 10, 64)
 	if err != nil {
@@ -302,6 +317,7 @@ func convertMMSEntry(mms MMSEntry, loadMediaOpt ...bool) (Message, error) {
 		ContactName: mms.ContactName,
 		Sender:      sender,
 		Addresses:   addresses,
+		Account:     account,
 	}
 
 	// Extract body text and media from parts
@@ -588,7 +604,7 @@ func convertAudioToMP3(audioData []byte) ([]byte, error) {
 	return convertedData, nil
 }
 
-func convertCallEntry(call CallEntry) (CallLog, error) {
+func convertCallEntry(call CallEntry, defaultAccount ...string) (CallLog, error) {
 	dateMs, err := strconv.ParseInt(call.Date, 10, 64)
 	if err != nil {
 		return CallLog{}, err
@@ -597,6 +613,14 @@ func convertCallEntry(call CallEntry) (CallLog, error) {
 	duration, _ := strconv.Atoi(call.Duration)
 	callType, _ := strconv.Atoi(call.Type)
 	presentation, _ := strconv.Atoi(call.Presentation)
+
+	account := call.Account
+	if account == "" && len(defaultAccount) > 0 {
+		account = defaultAccount[0]
+	}
+	if account != "" {
+		account = normalizePhoneNumber(account)
+	}
 
 	// Normalize the phone number to remove formatting differences
 	normalizedNumber := normalizePhoneNumber(call.Number)
@@ -609,6 +633,7 @@ func convertCallEntry(call CallEntry) (CallLog, error) {
 		Presentation:   presentation,
 		SubscriptionID: call.SubscriptionID,
 		ContactName:    call.ContactName,
+		Account:        account,
 	}, nil
 }
 
@@ -865,6 +890,11 @@ func ProcessUploadedFile(userID string, username string, filePath string, loadMe
 		return
 	}
 
+	detectedAccount := DetectAccountForFile(filePath)
+	if detectedAccount != "" {
+		slog.Info("Detected account for uploaded backup", "account", detectedAccount, "file", filePath)
+	}
+
 	// Check if file is a zip archive
 	if isZipFile(filePath) || strings.HasSuffix(strings.ToLower(filePath), ".zip") {
 		zReader, err := zip.OpenReader(filePath)
@@ -892,7 +922,7 @@ func ProcessUploadedFile(userID string, username string, filePath string, loadMe
 					slog.Error("Error opening XML from zip", "file", zFile.Name, "error", err)
 					continue
 				}
-				mCount, cCount, err := ParseSMSBackupStreaming(userDB, rc, defaultImportBatchSize, loadMedia)
+				mCount, cCount, err := ParseSMSBackupStreaming(userDB, rc, defaultImportBatchSize, loadMedia, detectedAccount)
 				rc.Close()
 				if err != nil {
 					slog.Error("Error processing file inside zip", "file", zFile.Name, "error", err)
@@ -947,7 +977,7 @@ func ProcessUploadedFile(userID string, username string, filePath string, loadMe
 	// Process with streaming parser. batchSize only controls how many rows
 	// share one commit -- rows are still inserted and their data freed one at
 	// a time as decoded, so this doesn't affect peak memory usage.
-	messageCount, callCount, err := ParseSMSBackupStreaming(userDB, file, defaultImportBatchSize, loadMedia)
+	messageCount, callCount, err := ParseSMSBackupStreaming(userDB, file, defaultImportBatchSize, loadMedia, detectedAccount)
 	if err != nil {
 		slog.Error("Error processing file", "error", err)
 		SetUploadProgress(0, 0, "error")
@@ -981,10 +1011,16 @@ const defaultImportBatchSize = 200
 // re-importable on retry either way, since INSERT ... ON CONFLICT DO NOTHING
 // makes re-running the same file idempotent, but a smaller batch bounds how
 // much re-decoding work a failure near the end of a large import wastes.
-func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int, loadMediaOpt ...bool) (int, int, error) {
+func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int, opts ...interface{}) (int, int, error) {
 	loadMedia := true
-	if len(loadMediaOpt) > 0 {
-		loadMedia = loadMediaOpt[0]
+	defaultAccount := ""
+	for _, opt := range opts {
+		switch v := opt.(type) {
+		case bool:
+			loadMedia = v
+		case string:
+			defaultAccount = v
+		}
 	}
 	if batchSize <= 0 {
 		batchSize = defaultImportBatchSize
@@ -1098,7 +1134,7 @@ func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int, loadMed
 					continue
 				}
 
-				msg, err := convertSMSEntry(sms)
+				msg, err := convertSMSEntry(sms, defaultAccount)
 				if err != nil {
 					slog.Error("Error converting SMS", "error", err)
 					continue
@@ -1227,4 +1263,57 @@ func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int, loadMed
 	SetUploadProgress(messageCount, messageCount, "completed")
 
 	return messageCount, callCount, nil
+}
+
+// DetectAccountForFile inspects a backup file (XML, ZIP, or Signal) and returns the detected primary phone account
+func DetectAccountForFile(filePath string, signalPassphrase ...string) string {
+	lower := strings.ToLower(filePath)
+	if IsSignalBackup(filePath) {
+		pp := ""
+		if len(signalPassphrase) > 0 {
+			pp = signalPassphrase[0]
+		}
+		if pp != "" {
+			selfPhone, _, err := ExtractSignalSelfPhone(filePath, pp)
+			if err == nil && selfPhone != "" {
+				return normalizePhoneNumber(selfPhone)
+			}
+		}
+		return ""
+	}
+
+	counts := make(map[string]int)
+	sources := make(map[string]string)
+	if strings.HasSuffix(lower, ".zip") || isZipFile(filePath) {
+		zr, err := zip.OpenReader(filePath)
+		if err == nil {
+			defer zr.Close()
+			for _, zf := range zr.File {
+				if strings.HasSuffix(strings.ToLower(zf.Name), ".xml") {
+					rc, err := zf.Open()
+					if err == nil {
+						scanBackupStreamForUserNumbers(rc, counts, sources)
+						rc.Close()
+						break
+					}
+				}
+			}
+		}
+	} else {
+		f, err := os.Open(filePath)
+		if err == nil {
+			defer f.Close()
+			scanBackupStreamForUserNumbers(f, counts, sources)
+		}
+	}
+
+	bestPhone := ""
+	bestCount := 0
+	for phone, count := range counts {
+		if count > bestCount {
+			bestCount = count
+			bestPhone = phone
+		}
+	}
+	return bestPhone
 }

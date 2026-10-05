@@ -8,7 +8,7 @@ import MediaGrid from './MediaGrid'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
-function MessageThread({ conversation, startDate, endDate, messageLimit }) {
+function MessageThread({ conversation, startDate, endDate, messageLimit, account }) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
   const location = useLocation()
@@ -42,7 +42,7 @@ function MessageThread({ conversation, startDate, endDate, messageLimit }) {
       setTailOffset(0)
       setTotalCount(0)
     }
-  }, [conversation, startDate, endDate, messageLimit])
+  }, [conversation, startDate, endDate, messageLimit, account])
 
   // After loading older items, scroll to the first new item so the user sees
   // where the new content starts.
@@ -273,6 +273,7 @@ function MessageThread({ conversation, startDate, endDate, messageLimit }) {
       }
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (account && account !== 'all') params.account = account
 
       // Fetch with offset 0 first to get the total count, then re-fetch the last page
       const probe = await axios.get(`${API_BASE}/messages`, { params })
@@ -314,6 +315,7 @@ function MessageThread({ conversation, startDate, endDate, messageLimit }) {
       }
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (account && account !== 'all') params.account = account
 
       const response = await axios.get(`${API_BASE}/messages`, { params })
       const olderItems = response.data.items || []
@@ -358,6 +360,7 @@ function MessageThread({ conversation, startDate, endDate, messageLimit }) {
       }
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (account && account !== 'all') params.account = account
 
       const response = await axios.get(`${API_BASE}/messages`, { params })
       const newerItems = response.data.items || []

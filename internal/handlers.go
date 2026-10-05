@@ -164,7 +164,8 @@ func HandleConversations(c echo.Context) error {
 		}
 	}
 
-	conversations, err := GetConversations(userDB, startDate, endDate)
+	account := c.QueryParam("account")
+	conversations, err := GetConversations(userDB, startDate, endDate, account)
 	if err != nil {
 		slog.Error("Error getting conversations", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -208,9 +209,11 @@ func HandleMessages(c echo.Context) error {
 		}
 	}
 
+	account := c.QueryParam("account")
+
 	// If type is "call", return call logs instead of messages
 	if convType == "call" {
-		calls, err := GetCallLogs(userDB, address, startDate, endDate)
+		calls, err := GetCallLogs(userDB, address, startDate, endDate, account)
 		if err != nil {
 			slog.Error("Error getting call logs", "error", err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -256,13 +259,13 @@ func HandleMessages(c echo.Context) error {
 			}
 		}
 
-		total, err := CountActivityByAddress(userDB, address, startDate, endDate)
+		total, err := CountActivityByAddress(userDB, address, startDate, endDate, account)
 		if err != nil {
 			slog.Error("Error counting activity", "error", err)
 			total = 0
 		}
 
-		activities, err := GetActivityByAddress(userDB, address, startDate, endDate, limit, offset)
+		activities, err := GetActivityByAddress(userDB, address, startDate, endDate, limit, offset, account)
 		if err != nil {
 			slog.Error("Error getting activity", "error", err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -287,7 +290,7 @@ func HandleMessages(c echo.Context) error {
 		})
 	}
 
-	messages, err := GetMessages(userDB, address, startDate, endDate)
+	messages, err := GetMessages(userDB, address, startDate, endDate, account)
 	if err != nil {
 		slog.Error("Error getting messages", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -325,7 +328,8 @@ func HandleMediaItems(c echo.Context) error {
 		}
 	}
 
-	mediaItems, err := GetMediaByAddress(userDB, address, startDate, endDate)
+	account := c.QueryParam("account")
+	mediaItems, err := GetMediaByAddress(userDB, address, startDate, endDate, account)
 	if err != nil {
 		slog.Error("Error getting media items", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -377,7 +381,8 @@ func HandleActivity(c echo.Context) error {
 		}
 	}
 
-	activities, err := GetActivity(userDB, startDate, endDate, limit, offset)
+	account := c.QueryParam("account")
+	activities, err := GetActivity(userDB, startDate, endDate, limit, offset, account)
 	if err != nil {
 		slog.Error("Error getting activity", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -429,7 +434,8 @@ func HandleCalls(c echo.Context) error {
 		}
 	}
 
-	calls, err := GetAllCalls(userDB, startDate, endDate, limit, offset)
+	account := c.QueryParam("account")
+	calls, err := GetAllCalls(userDB, startDate, endDate, limit, offset, account)
 	if err != nil {
 		slog.Error("Error getting calls", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -449,7 +455,8 @@ func HandleDateRange(c echo.Context) error {
 		})
 	}
 
-	minDate, maxDate, err := GetDateRange(userDB)
+	account := c.QueryParam("account")
+	minDate, maxDate, err := GetDateRange(userDB, account)
 	if err == ErrNoDateRange {
 		// No messages imported yet is a normal state for a new account,
 		// not a server error - return empty bounds instead of a 500
@@ -606,7 +613,8 @@ func HandleSearch(c echo.Context) error {
 	}
 
 	// Perform search
-	results, err := SearchMessages(userDB, query, limit)
+	account := c.QueryParam("account")
+	results, err := SearchMessages(userDB, query, limit, account)
 	if err != nil {
 		slog.Error("Error searching messages", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -659,7 +667,8 @@ func HandleAnalytics(c echo.Context) error {
 		}
 	}
 
-	analytics, err := GetAnalytics(userDB, startDate, endDate, topN, tzOffsetMinutes)
+	account := c.QueryParam("account")
+	analytics, err := GetAnalytics(userDB, startDate, endDate, topN, tzOffsetMinutes, account)
 	if err != nil {
 		slog.Error("Error getting analytics", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -684,4 +693,29 @@ func HandleVersion(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{
 		"version": "dev",
 	})
+}
+
+// HandleGetAccounts returns all phone number accounts detected in the user database
+func HandleGetAccounts(c echo.Context) error {
+	userDB, err := getUserDB(c)
+	if err != nil {
+		slog.Error("Error getting user database", "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "Failed to get user database",
+		})
+	}
+
+	accounts, err := GetAccounts(userDB)
+	if err != nil {
+		slog.Error("Error getting accounts", "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "Failed to get accounts",
+		})
+	}
+
+	if accounts == nil {
+		accounts = []AccountInfo{}
+	}
+
+	return c.JSON(http.StatusOK, accounts)
 }

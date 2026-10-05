@@ -267,7 +267,8 @@ func (s *AutoImportService) parseXMLBackup(userDB *sql.DB, filePath string, logg
 	logger.log("File size: %d bytes", fileSize)
 
 	// Parse the XML backup using streaming parser
-	totalProcessed, totalSkipped, err := ParseSMSBackupStreaming(userDB, file, 100)
+	detectedAccount := DetectAccountForFile(filePath)
+	totalProcessed, totalSkipped, err := ParseSMSBackupStreaming(userDB, file, 100, true, detectedAccount)
 	if err != nil {
 		return fmt.Errorf("failed to parse backup: %w", err)
 	}
@@ -318,7 +319,8 @@ func (s *AutoImportService) parseZipBackup(userDB *sql.DB, filePath string, logg
 				logger.log("ERROR: Failed to open %s: %v", zFile.Name, err)
 				return fmt.Errorf("failed to open %s from zip: %w", zFile.Name, err)
 			}
-			mCount, cCount, err := ParseSMSBackupStreaming(userDB, rc, 100)
+			detectedAccount := DetectAccountForFile(filePath)
+			mCount, cCount, err := ParseSMSBackupStreaming(userDB, rc, 100, true, detectedAccount)
 			rc.Close()
 			if err != nil {
 				logger.log("ERROR: Failed to parse %s inside zip: %v", zFile.Name, err)

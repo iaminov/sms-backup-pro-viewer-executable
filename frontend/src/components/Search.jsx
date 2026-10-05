@@ -5,7 +5,7 @@ import { format } from 'date-fns'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
-function Search({ searchQuery, setSearchQuery, results, setResults, loading, setLoading, searched, setSearched, scrollPosition, setScrollPosition }) {
+function Search({ searchQuery, setSearchQuery, results, setResults, loading, setLoading, searched, setSearched, scrollPosition, setScrollPosition, account }) {
   const navigate = useNavigate()
   const scrollContainerRef = useRef(null)
 
@@ -18,7 +18,7 @@ function Search({ searchQuery, setSearchQuery, results, setResults, loading, set
 
     try {
       const response = await axios.get(`${API_BASE}/search`, {
-        params: { q: searchQuery, limit: 1000 }
+        params: { q: searchQuery, limit: 1000, ...(account && account !== 'all' ? { account } : {}) }
       })
       setResults(response.data || [])
     } catch (error) {

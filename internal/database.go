@@ -155,7 +155,8 @@ func InitDB(filepath string) error {
 		addresses TEXT,
 		duration INTEGER,
 		presentation INTEGER,
-		subscription_id TEXT
+		subscription_id TEXT,
+		account TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_address ON messages(address);
@@ -203,6 +204,9 @@ func InitDB(filepath string) error {
 	if err != nil {
 		return err
 	}
+	_, _ = db.Exec("ALTER TABLE messages ADD COLUMN account TEXT;")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account);")
+	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS idx_messages_account_addr ON messages(account, address);")
 
 	slog.Info("Database initialized successfully")
 	return nil
@@ -275,7 +279,8 @@ func InitUserDB(userID string, filepath string) error {
 		addresses TEXT,
 		duration INTEGER,
 		presentation INTEGER,
-		subscription_id TEXT
+		subscription_id TEXT,
+		account TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_address ON messages(address);
@@ -320,6 +325,9 @@ func InitUserDB(userID string, filepath string) error {
 	if err != nil {
 		return err
 	}
+	_, _ = userDB.Exec("ALTER TABLE messages ADD COLUMN account TEXT;")
+	_, _ = userDB.Exec("CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account);")
+	_, _ = userDB.Exec("CREATE INDEX IF NOT EXISTS idx_messages_account_addr ON messages(account, address);")
 
 	// Store in map
 	userDBsMutex.Lock()
@@ -394,9 +402,9 @@ func InsertMessage(userDB dbExecer, msg *Message) error {
 		INSERT INTO messages (
 			record_type, address, body, type, date, read, thread_id, subject, media_type, media_data,
 			protocol, status, service_center, sub_id, contact_name, sender,
-			content_type, read_report, read_status, message_id, message_size, message_type, sim_slot, addresses
+			content_type, read_report, read_status, message_id, message_size, message_type, sim_slot, addresses, account
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING
 	`
 	result, err := userDB.Exec(query,
@@ -424,6 +432,7 @@ func InsertMessage(userDB dbExecer, msg *Message) error {
 		msg.MessageType,
 		msg.SimSlot,
 		addressesJSON,
+		msg.Account,
 	)
 	if err != nil {
 		slog.Debug("InsertMessage: Error inserting message", "error", err)
@@ -441,8 +450,8 @@ func InsertMessage(userDB dbExecer, msg *Message) error {
 
 func InsertCallLog(userDB dbExecer, call *CallLog) error {
 	query := `
-		INSERT INTO messages (record_type, address, type, date, duration, presentation, subscription_id, contact_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (record_type, address, type, date, duration, presentation, subscription_id, contact_name, account)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING
 	`
 	result, err := userDB.Exec(query,
@@ -454,6 +463,7 @@ func InsertCallLog(userDB dbExecer, call *CallLog) error {
 		call.Presentation,
 		call.SubscriptionID,
 		call.ContactName,
+		call.Account,
 	)
 	if err != nil {
 		return err
@@ -480,8 +490,8 @@ func InsertCallLogBatch(userDB *sql.DB, calls []CallLog) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO messages (record_type, address, type, date, duration, presentation, subscription_id, contact_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (record_type, address, type, date, duration, presentation, subscription_id, contact_name, account)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING
 	`)
 	if err != nil {
@@ -499,6 +509,7 @@ func InsertCallLogBatch(userDB *sql.DB, calls []CallLog) error {
 			calls[i].Presentation,
 			calls[i].SubscriptionID,
 			calls[i].ContactName,
+			calls[i].Account,
 		)
 		if err != nil {
 			return err
@@ -508,13 +519,10 @@ func InsertCallLogBatch(userDB *sql.DB, calls []CallLog) error {
 	return tx.Commit()
 }
 
-func GetConversations(userDB *sql.DB, startDate, endDate *time.Time) ([]Conversation, error) {
+func GetConversations(userDB *sql.DB, startDate, endDate *time.Time, accountOpt ...string) ([]Conversation, error) {
 	// Find the latest row per address via a correlated subquery against
 	// idx_address_date, rather than joining a second CTE that re-scans the
-	// whole table. EXPLAIN QUERY PLAN confirms this drives the subquery as an
-	// indexed SEARCH (address=? AND date=?) instead of a second full SCAN of
-	// messages -- meaningful on large per-user databases, especially over
-	// network-backed storage where a second full-table scan is expensive.
+	// whole table.
 	dateFilter := "1=1"
 	args := []interface{}{}
 	if startDate != nil {
@@ -525,8 +533,10 @@ func GetConversations(userDB *sql.DB, startDate, endDate *time.Time) ([]Conversa
 		dateFilter += " AND date <= ?"
 		args = append(args, endDate.Unix())
 	}
-	// args are used twice: once for the agg CTE, once for the correlated subquery
-	args = append(args, args...)
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		dateFilter += " AND account = ?"
+		args = append(args, accountOpt[0])
+	}
 
 	query := `
 		WITH
@@ -609,7 +619,7 @@ func formatCallType(callType int) string {
 	}
 }
 
-func GetMessages(userDB *sql.DB, address string, startDate, endDate *time.Time) ([]Message, error) {
+func GetMessages(userDB *sql.DB, address string, startDate, endDate *time.Time, accountOpt ...string) ([]Message, error) {
 	query := `
 		SELECT id, address, body, type, date, read, thread_id,
 		       COALESCE(subject, ''), COALESCE(media_type, ''), COALESCE(media_data, ''),
@@ -617,7 +627,7 @@ func GetMessages(userDB *sql.DB, address string, startDate, endDate *time.Time) 
 		       COALESCE(sub_id, 0), COALESCE(contact_name, ''), COALESCE(sender, ''),
 		       COALESCE(content_type, ''), COALESCE(read_report, 0), COALESCE(read_status, 0),
 		       COALESCE(message_id, ''), COALESCE(message_size, 0), COALESCE(message_type, 0),
-		       COALESCE(sim_slot, 0), COALESCE(addresses, '')
+		       COALESCE(sim_slot, 0), COALESCE(addresses, ''), COALESCE(account, '')
 		FROM messages
 		WHERE record_type IN (1, 2) AND address = ?  -- 1 = SMS, 2 = MMS
 	`
@@ -630,6 +640,10 @@ func GetMessages(userDB *sql.DB, address string, startDate, endDate *time.Time) 
 	if endDate != nil {
 		query += " AND date <= ?"
 		args = append(args, endDate.Unix())
+	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
 	}
 
 	query += " ORDER BY date ASC"
@@ -655,7 +669,7 @@ func GetMessages(userDB *sql.DB, address string, startDate, endDate *time.Time) 
 			&readInt, &m.ThreadID, &m.Subject, &m.MediaType, &m.MediaData,
 			&m.Protocol, &m.Status, &m.ServiceCenter, &m.SubID, &m.ContactName, &m.Sender,
 			&m.ContentType, &m.ReadReport, &m.ReadStatus, &m.MessageID,
-			&m.MessageSize, &m.MessageType, &m.SimSlot, &addressesStr)
+			&m.MessageSize, &m.MessageType, &m.SimSlot, &addressesStr, &m.Account)
 		if err != nil {
 			return nil, err
 		}
@@ -680,10 +694,11 @@ func GetMessages(userDB *sql.DB, address string, startDate, endDate *time.Time) 
 	return messages, nil
 }
 
-func GetCallLogs(userDB *sql.DB, number string, startDate, endDate *time.Time) ([]CallLog, error) {
+func GetCallLogs(userDB *sql.DB, number string, startDate, endDate *time.Time, accountOpt ...string) ([]CallLog, error) {
 	query := `
 		SELECT id, address, duration, date, type,
-		       COALESCE(presentation, 0), COALESCE(subscription_id, ''), COALESCE(contact_name, '')
+		       COALESCE(presentation, 0), COALESCE(subscription_id, ''), COALESCE(contact_name, ''),
+		       COALESCE(account, '')
 		FROM messages
 		WHERE record_type = 3 AND address = ?  -- 3 = call
 	`
@@ -696,6 +711,10 @@ func GetCallLogs(userDB *sql.DB, number string, startDate, endDate *time.Time) (
 	if endDate != nil {
 		query += " AND date <= ?"
 		args = append(args, endDate.Unix())
+	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
 	}
 
 	query += " ORDER BY date ASC"
@@ -711,7 +730,7 @@ func GetCallLogs(userDB *sql.DB, number string, startDate, endDate *time.Time) (
 		var c CallLog
 		var dateUnix int64
 		err := rows.Scan(&c.ID, &c.Number, &c.Duration, &dateUnix, &c.Type,
-			&c.Presentation, &c.SubscriptionID, &c.ContactName)
+			&c.Presentation, &c.SubscriptionID, &c.ContactName, &c.Account)
 		if err != nil {
 			return nil, err
 		}
@@ -722,10 +741,11 @@ func GetCallLogs(userDB *sql.DB, number string, startDate, endDate *time.Time) (
 	return calls, nil
 }
 
-func GetAllCalls(userDB *sql.DB, startDate, endDate *time.Time, limit, offset int) ([]CallLog, error) {
+func GetAllCalls(userDB *sql.DB, startDate, endDate *time.Time, limit, offset int, accountOpt ...string) ([]CallLog, error) {
 	query := `
 		SELECT id, address, duration, date, type,
-		       COALESCE(presentation, 0), COALESCE(subscription_id, ''), COALESCE(contact_name, '')
+		       COALESCE(presentation, 0), COALESCE(subscription_id, ''), COALESCE(contact_name, ''),
+		       COALESCE(account, '')
 		FROM messages
 		WHERE record_type = 3  -- 3 = call
 	`
@@ -738,6 +758,10 @@ func GetAllCalls(userDB *sql.DB, startDate, endDate *time.Time, limit, offset in
 	if endDate != nil {
 		query += " AND date <= ?"
 		args = append(args, endDate.Unix())
+	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
 	}
 
 	query += " ORDER BY date ASC LIMIT ? OFFSET ?"
@@ -754,7 +778,7 @@ func GetAllCalls(userDB *sql.DB, startDate, endDate *time.Time, limit, offset in
 		var c CallLog
 		var dateUnix int64
 		err := rows.Scan(&c.ID, &c.Number, &c.Duration, &dateUnix, &c.Type,
-			&c.Presentation, &c.SubscriptionID, &c.ContactName)
+			&c.Presentation, &c.SubscriptionID, &c.ContactName, &c.Account)
 		if err != nil {
 			return nil, err
 		}
@@ -765,11 +789,11 @@ func GetAllCalls(userDB *sql.DB, startDate, endDate *time.Time, limit, offset in
 	return calls, nil
 }
 
-func GetActivity(userDB *sql.DB, startDate, endDate *time.Time, limit, offset int) ([]ActivityItem, error) {
-	return GetActivityByAddress(userDB, "", startDate, endDate, limit, offset)
+func GetActivity(userDB *sql.DB, startDate, endDate *time.Time, limit, offset int, accountOpt ...string) ([]ActivityItem, error) {
+	return GetActivityByAddress(userDB, "", startDate, endDate, limit, offset, accountOpt...)
 }
 
-func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *time.Time, limit, offset int) ([]ActivityItem, error) {
+func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *time.Time, limit, offset int, accountOpt ...string) ([]ActivityItem, error) {
 	var activities []ActivityItem
 
 	// Query from unified table — media_data is intentionally excluded; fetched on-demand via /api/media
@@ -782,7 +806,7 @@ func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *ti
 		       COALESCE(read_status, 0), COALESCE(message_id, ''), COALESCE(message_size, 0),
 		       COALESCE(message_type, 0), COALESCE(sim_slot, 0), COALESCE(addresses, ''),
 		       COALESCE(duration, 0), COALESCE(presentation, 0), COALESCE(subscription_id, ''),
-		       COALESCE(sender, '')
+		       COALESCE(sender, ''), COALESCE(account, '')
 		FROM messages
 		WHERE 1=1
 	`
@@ -799,6 +823,10 @@ func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *ti
 	if endDate != nil {
 		query += " AND date <= ?"
 		args = append(args, endDate.Unix())
+	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
 	}
 
 	query += " ORDER BY date ASC LIMIT ? OFFSET ?"
@@ -830,6 +858,7 @@ func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *ti
 
 		// Call fields
 		var duration, presentation sql.NullInt64
+		var accountStr sql.NullString
 
 		err := rows.Scan(&recordType, &dateUnix, &address, &contactName,
 			&id, &body, &itemType, &readInt, &threadID, &subject,
@@ -838,7 +867,7 @@ func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *ti
 			&subID, &contentType, &readReport,
 			&readStatus, &messageID, &messageSize,
 			&messageTypeField, &simSlot, &addressesStr,
-			&duration, &presentation, &subscriptionID, &sender)
+			&duration, &presentation, &subscriptionID, &sender, &accountStr)
 		if err != nil {
 			return nil, err
 		}
@@ -916,6 +945,7 @@ func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *ti
 				Presentation:   int(presentation.Int64),
 				SubscriptionID: subscriptionID.String,
 				ContactName:    contactName,
+				Account:        accountStr.String,
 			}
 			slog.Debug("GetActivityByAddress: Call", "id", call.ID, "number", call.Number, "type", call.Type, "duration", call.Duration)
 			activity.Call = call
@@ -929,7 +959,7 @@ func GetActivityByAddress(userDB *sql.DB, address string, startDate, endDate *ti
 }
 
 // CountActivityByAddress returns the total number of activity rows for a given address and date range
-func CountActivityByAddress(userDB *sql.DB, address string, startDate, endDate *time.Time) (int, error) {
+func CountActivityByAddress(userDB *sql.DB, address string, startDate, endDate *time.Time, accountOpt ...string) (int, error) {
 	query := `SELECT COUNT(*) FROM messages WHERE 1=1`
 	args := []interface{}{}
 	if address != "" {
@@ -944,17 +974,21 @@ func CountActivityByAddress(userDB *sql.DB, address string, startDate, endDate *
 		query += " AND date <= ?"
 		args = append(args, endDate.Unix())
 	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
+	}
 	var count int
 	err := userDB.QueryRow(query, args...).Scan(&count)
 	return count, err
 }
 
 // GetMediaByAddress fetches only media items (images/videos) for a specific address
-func GetMediaByAddress(userDB *sql.DB, address string, startDate, endDate *time.Time) ([]Message, error) {
+func GetMediaByAddress(userDB *sql.DB, address string, startDate, endDate *time.Time, accountOpt ...string) ([]Message, error) {
 	query := `
 		SELECT id, address, COALESCE(body, '') as body, date,
 		       COALESCE(contact_name, '') as contact_name, COALESCE(media_type, '') as media_type,
-		       read, thread_id
+		       read, thread_id, COALESCE(account, '')
 		FROM messages
 		WHERE record_type IN (1, 2)
 		AND media_type IS NOT NULL
@@ -975,6 +1009,10 @@ func GetMediaByAddress(userDB *sql.DB, address string, startDate, endDate *time.
 		query += " AND date <= ?"
 		args = append(args, endDate.Unix())
 	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
+	}
 
 	query += " ORDER BY date DESC"
 
@@ -990,7 +1028,7 @@ func GetMediaByAddress(userDB *sql.DB, address string, startDate, endDate *time.
 		var dateUnix int64
 		var readInt int64
 
-		err := rows.Scan(&m.ID, &m.Address, &m.Body, &dateUnix, &m.ContactName, &m.MediaType, &readInt, &m.ThreadID)
+		err := rows.Scan(&m.ID, &m.Address, &m.Body, &dateUnix, &m.ContactName, &m.MediaType, &readInt, &m.ThreadID, &m.Account)
 		if err != nil {
 			return nil, err
 		}
@@ -1073,13 +1111,18 @@ func GetMessageMedia(userDB *sql.DB, messageID string) ([]byte, string, error) {
 // an actual query failure
 var ErrNoDateRange = fmt.Errorf("no data available")
 
-func GetDateRange(userDB *sql.DB) (time.Time, time.Time, error) {
+func GetDateRange(userDB *sql.DB, accountOpt ...string) (time.Time, time.Time, error) {
 	var minDate, maxDate int64
 
 	// Get min/max from unified messages table
-	query := "SELECT MIN(date), MAX(date) FROM messages"
+	query := "SELECT MIN(date), MAX(date) FROM messages WHERE 1=1"
+	args := []interface{}{}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		query += " AND account = ?"
+		args = append(args, accountOpt[0])
+	}
 	var min, max sql.NullInt64
-	err := userDB.QueryRow(query).Scan(&min, &max)
+	err := userDB.QueryRow(query, args...).Scan(&min, &max)
 	if err != nil && err != sql.ErrNoRows {
 		return time.Time{}, time.Time{}, err
 	}
@@ -1105,7 +1148,7 @@ type SearchResult struct {
 }
 
 // SearchMessages performs full-text search on message contents
-func SearchMessages(userDB *sql.DB, query string, limit int) ([]SearchResult, error) {
+func SearchMessages(userDB *sql.DB, query string, limit int, accountOpt ...string) ([]SearchResult, error) {
 	if query == "" {
 		return []SearchResult{}, nil
 	}
@@ -1121,11 +1164,16 @@ func SearchMessages(userDB *sql.DB, query string, limit int) ([]SearchResult, er
 		FROM messages_fts
 		JOIN messages m ON messages_fts.rowid = m.id
 		WHERE messages_fts MATCH ?
-		ORDER BY rank
-		LIMIT ?
 	`
+	args := []interface{}{query}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		sqlQuery += " AND m.account = ?"
+		args = append(args, accountOpt[0])
+	}
+	sqlQuery += " ORDER BY rank LIMIT ?"
+	args = append(args, limit)
 
-	rows, err := userDB.Query(sqlQuery, query, limit)
+	rows, err := userDB.Query(sqlQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1147,7 +1195,7 @@ func SearchMessages(userDB *sql.DB, query string, limit int) ([]SearchResult, er
 }
 
 // GetAnalytics retrieves analytics data for the Summary tab
-func GetAnalytics(userDB *sql.DB, startDate, endDate *time.Time, topN int, tzOffsetMinutes int) (*AnalyticsResponse, error) {
+func GetAnalytics(userDB *sql.DB, startDate, endDate *time.Time, topN int, tzOffsetMinutes int, accountOpt ...string) (*AnalyticsResponse, error) {
 	analytics := &AnalyticsResponse{}
 
 	// Build date filter
@@ -1160,6 +1208,10 @@ func GetAnalytics(userDB *sql.DB, startDate, endDate *time.Time, topN int, tzOff
 	if endDate != nil {
 		dateFilter += " AND date <= ?"
 		args = append(args, endDate.Unix())
+	}
+	if len(accountOpt) > 0 && accountOpt[0] != "" && accountOpt[0] != "all" {
+		dateFilter += " AND account = ?"
+		args = append(args, accountOpt[0])
 	}
 
 	// 1. Get summary statistics
@@ -1319,4 +1371,38 @@ func getDailyTrend(userDB *sql.DB, dateFilter string, args []interface{}) ([]Dai
 		trend = append(trend, d)
 	}
 	return trend, nil
+}
+
+// GetAccounts returns all distinct phone accounts found in the database with their message and call counts
+func GetAccounts(userDB *sql.DB) ([]AccountInfo, error) {
+	query := `
+		SELECT COALESCE(account, '') as acc,
+		       COUNT(*) as total_count,
+		       SUM(CASE WHEN record_type = 3 THEN 1 ELSE 0 END) as call_count
+		FROM messages
+		WHERE account IS NOT NULL AND account != ''
+		GROUP BY acc
+		ORDER BY total_count DESC
+	`
+	rows, err := userDB.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []AccountInfo
+	for rows.Next() {
+		var acc string
+		var total, calls int
+		if err := rows.Scan(&acc, &total, &calls); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, AccountInfo{
+			Account:      acc,
+			Formatted:    formatPhoneDisplay(acc),
+			MessageCount: total - calls,
+			CallCount:    calls,
+		})
+	}
+	return accounts, nil
 }

@@ -195,11 +195,16 @@ func getAttrValue(attrs []xml.Attr, name string) string {
 }
 
 // computeSMSDedupKey produces a deterministic 16-byte MD5 hash for an SMS message
-func computeSMSDedupKey(address, dateStr, msgType, body string) [16]byte {
+func computeSMSDedupKey(address, dateStr, msgType, body string, accountOpt ...string) [16]byte {
 	normAddr := normalizePhoneNumber(address)
 	trimmedBody := strings.TrimSpace(body)
 	h := md5.New()
 	h.Write([]byte("sms:"))
+	if len(accountOpt) > 0 && accountOpt[0] != "" {
+		h.Write([]byte("acc:"))
+		h.Write([]byte(accountOpt[0]))
+		h.Write([]byte(":"))
+	}
 	h.Write([]byte(normAddr))
 	h.Write([]byte(":"))
 	h.Write([]byte(dateStr))
@@ -213,13 +218,18 @@ func computeSMSDedupKey(address, dateStr, msgType, body string) [16]byte {
 }
 
 // computeMMSDedupKey produces a deterministic 16-byte MD5 hash for an MMS message
-func computeMMSDedupKey(mms *MMSEntry) [16]byte {
+func computeMMSDedupKey(mms *MMSEntry, accountOpt ...string) [16]byte {
 	mID := strings.TrimSpace(mms.MessageID)
 	trID := strings.TrimSpace(mms.TrID)
 	dateStr := strings.TrimSpace(mms.Date)
 
 	h := md5.New()
 	h.Write([]byte("mms:"))
+	if len(accountOpt) > 0 && accountOpt[0] != "" {
+		h.Write([]byte("acc:"))
+		h.Write([]byte(accountOpt[0]))
+		h.Write([]byte(":"))
+	}
 
 	if mID != "" && !strings.EqualFold(mID, "null") {
 		h.Write([]byte("mid:"))
@@ -668,6 +678,10 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 
 	for fileIdx, filePath := range files {
 		fileName := filepath.Base(filePath)
+		fileAccount := ""
+		if !opts.NormalizeMyNumber {
+			fileAccount = DetectAccountForFile(filePath, opts.SignalPassphrase)
+		}
 		updateMergeProgress(func(p *MergeProgress) {
 			p.ProcessedFiles = fileIdx + 1
 			p.CurrentFile = fileName
@@ -710,7 +724,11 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 					body := getAttrValue(startElem.Attr, "body")
 					contact := getAttrValue(startElem.Attr, "contact_name")
 
-					key := computeSMSDedupKey(addr, dateStr, msgType, body)
+					if !opts.NormalizeMyNumber && fileAccount != "" && getAttrValue(startElem.Attr, "account") == "" {
+						startElem.Attr = append(startElem.Attr, xml.Attr{Name: xml.Name{Local: "account"}, Value: fileAccount})
+					}
+					smsAcc := getAttrValue(startElem.Attr, "account")
+					key := computeSMSDedupKey(addr, dateStr, msgType, body, smsAcc)
 					richness := 1
 					if contact != "" && !strings.EqualFold(contact, "(unknown)") && !strings.EqualFold(contact, "null") {
 						richness = 2
@@ -768,7 +786,13 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 						}
 
 						dateMs, _ := strconv.ParseInt(mms.Date, 10, 64)
-						key := computeMMSDedupKey(&mms)
+						if !opts.NormalizeMyNumber && fileAccount != "" && mms.Account == "" {
+							mms.Account = fileAccount
+						}
+						if mms.Account != "" && getAttrValue(startElem.Attr, "account") == "" {
+							startElem.Attr = append(startElem.Attr, xml.Attr{Name: xml.Name{Local: "account"}, Value: mms.Account})
+						}
+						key := computeMMSDedupKey(&mms, mms.Account)
 
 						richness := 1
 						hasMedia := false
@@ -830,8 +854,14 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "sub_id"}, Value: sms.SubID})
 					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "readable_date"}, Value: sms.ReadableDate})
 					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "contact_name"}, Value: sms.ContactName})
+					if !opts.NormalizeMyNumber && fileAccount != "" && sms.Account == "" {
+						sms.Account = fileAccount
+					}
+					if sms.Account != "" {
+						attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "account"}, Value: sms.Account})
+					}
 
-					key := computeSMSDedupKey(sms.Address, sms.Date, sms.Type, sms.Body)
+					key := computeSMSDedupKey(sms.Address, sms.Date, sms.Type, sms.Body, sms.Account)
 					xmlBytes := formatNormalizedSMS(attrs, smsSchema, dateMs)
 					richness := 1
 					if sms.Body != "" {

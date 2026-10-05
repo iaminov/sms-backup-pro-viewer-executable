@@ -24,6 +24,8 @@ function App() {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuth()
+  const [accounts, setAccounts] = useState([])
+  const [selectedAccount, setSelectedAccount] = useState('all')
   const [conversations, setConversations] = useState([])
   const [conversationsLoading, setConversationsLoading] = useState(false)
   const [selectedConversation, setSelectedConversation] = useState(null)
@@ -76,16 +78,17 @@ function App() {
     fetchSettings()
     fetchDateRange()
     fetchVersion()
+    fetchAccounts()
   }, [])
 
   useEffect(() => {
-    // Wait for fetchSettings() to resolve at least once, so this doesn't
-    // fire once with placeholder defaults and again moments later with the
-    // real settings -- two redundant /api/conversations requests for every
-    // page load.
     if (!settingsLoaded) return
     fetchConversations()
-  }, [startDate, endDate, settings, settingsLoaded])
+  }, [startDate, endDate, settings, settingsLoaded, selectedAccount])
+
+  useEffect(() => {
+    fetchDateRange()
+  }, [selectedAccount])
 
   const fetchVersion = async () => {
     try {
@@ -156,7 +159,9 @@ function App() {
 
   const fetchDateRange = async () => {
     try {
-      const response = await axios.get(`${API_BASE}/daterange`)
+      const params = {}
+      if (selectedAccount && selectedAccount !== 'all') params.account = selectedAccount
+      const response = await axios.get(`${API_BASE}/daterange`, { params })
       setDateRange({
         min: response.data.min_date ? new Date(response.data.min_date) : null,
         max: response.data.max_date ? new Date(response.data.max_date) : null
@@ -172,6 +177,7 @@ function App() {
       const params = {}
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (selectedAccount && selectedAccount !== 'all') params.account = selectedAccount
 
       const response = await axios.get(`${API_BASE}/conversations`, { params })
       const conversationList = response.data || []
@@ -184,8 +190,18 @@ function App() {
     }
   }
 
+  const fetchAccounts = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/accounts`)
+      setAccounts(response.data || [])
+    } catch (error) {
+      console.error('Failed to fetch accounts:', error)
+    }
+  }
+
   const handleUploadSuccess = () => {
     setShowUpload(false)
+    fetchAccounts()
     fetchDateRange()
     fetchConversations()
   }
@@ -299,7 +315,7 @@ function App() {
 
       {/* View Switcher */}
       <div className="bg-body-tertiary border-bottom shadow-sm">
-        <div className="container-fluid">
+        <div className="container-fluid d-flex flex-wrap justify-content-between align-items-center">
           <ul className="nav nav-tabs border-0">
             <li className="nav-item">
               <button
@@ -357,6 +373,30 @@ function App() {
               </button>
             </li>
           </ul>
+          {accounts.length > 0 && (
+            <div className="d-flex align-items-center gap-2 py-1 pe-2">
+              <label htmlFor="accountSelector" className="small text-muted mb-0 fw-semibold d-none d-md-inline text-nowrap">
+                Account:
+              </label>
+              <select
+                id="accountSelector"
+                className="form-select form-select-sm shadow-sm"
+                style={{ width: 'auto', minWidth: '190px', maxWidth: '320px', fontWeight: 500 }}
+                value={selectedAccount}
+                onChange={(e) => setSelectedAccount(e.target.value)}
+                title="Segregate views and statistics by phone number account"
+              >
+                <option value="all">
+                  📱 All Accounts ({accounts.reduce((sum, a) => sum + (a.message_count || 0), 0).toLocaleString()} msgs)
+                </option>
+                {accounts.map(acc => (
+                  <option key={acc.account} value={acc.account}>
+                    📱 {acc.formatted || acc.account} ({acc.message_count?.toLocaleString()} msgs{acc.call_count ? `, ${acc.call_count.toLocaleString()} calls` : ''})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </div>
 
@@ -429,6 +469,7 @@ function App() {
                 startDate={startDate}
                 endDate={endDate}
                 messageLimit={settings.conversations.message_limit}
+                account={selectedAccount}
               />
             </div>
           </>
@@ -446,6 +487,7 @@ function App() {
               setSearched={setSearchExecuted}
               scrollPosition={searchScrollPosition}
               setScrollPosition={setSearchScrollPosition}
+              account={selectedAccount}
             />
           </div>
         ) : activeView === 'calls' ? (
@@ -454,6 +496,7 @@ function App() {
             <Calls
               startDate={startDate}
               endDate={endDate}
+              account={selectedAccount}
             />
           </div>
         ) : activeView === 'summary' ? (
@@ -462,6 +505,7 @@ function App() {
             <Summary
               startDate={startDate}
               endDate={endDate}
+              account={selectedAccount}
             />
           </div>
         ) : (
@@ -470,6 +514,7 @@ function App() {
             <Activity
               startDate={startDate}
               endDate={endDate}
+              account={selectedAccount}
             />
           </div>
         )}

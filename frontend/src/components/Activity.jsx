@@ -5,7 +5,7 @@ import LazyMedia from './LazyMedia'
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const PAGE_SIZE = 50
 
-function Activity({ startDate, endDate }) {
+function Activity({ startDate, endDate, account }) {
   const [activities, setActivities] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -20,7 +20,7 @@ function Activity({ startDate, endDate }) {
     setOffset(0)
     setHasMore(true)
     fetchActivity(0, false)
-  }, [startDate, endDate])
+  }, [startDate, endDate, account])
 
   const fetchActivity = async (currentOffset, append = false) => {
     if (append) {
@@ -36,6 +36,7 @@ function Activity({ startDate, endDate }) {
       }
       if (startDate) params.start = startDate.toISOString()
       if (endDate) params.end = endDate.toISOString()
+      if (account && account !== 'all') params.account = account
 
       const response = await axios.get(`${API_BASE}/activity`, { params })
       const newActivities = response.data || []
