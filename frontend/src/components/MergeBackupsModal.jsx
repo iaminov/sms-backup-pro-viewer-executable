@@ -191,7 +191,7 @@ function MergeBackupsModal({ onClose }) {
         )}
 
         {merging && (
-          <div className="p-3 mb-4 rounded border bg-light shadow-sm">
+          <div className="p-3 mb-4 rounded border bg-body-tertiary shadow-sm">
             <div className="d-flex justify-content-between align-items-center mb-2">
               <span className="fw-bold text-primary">
                 {progress?.status === 'scanning' && 'Scanning Folder & Subfolders...'}
@@ -278,7 +278,7 @@ function MergeBackupsModal({ onClose }) {
           </Form.Group>
 
           {/* Options */}
-          <div className="p-3 bg-light rounded border mb-3">
+          <div className="p-3 bg-body-tertiary rounded border mb-3">
             <Form.Label className="fw-semibold mb-2">Merge Configuration</Form.Label>
 
             <Form.Check

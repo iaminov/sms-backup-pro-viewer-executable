@@ -208,7 +208,7 @@ function ExtractMediaModal({ onClose }) {
               {progress.other_extracted > 0 && (
                 <Badge bg="dark" className="p-2">📎 {progress.other_extracted} Other</Badge>
               )}
-              <Badge bg="light" text="dark" className="p-2">💾 {formatBytes(progress.extracted_bytes || progress.total_bytes)} Total</Badge>
+              <Badge bg="secondary" className="p-2">💾 {formatBytes(progress.extracted_bytes || progress.total_bytes)} Total</Badge>
             </div>
             <div className="d-flex gap-2 align-items-center">
               <Button variant="success" size="sm" onClick={handleOpenFolder} className="d-flex align-items-center gap-1">
@@ -220,7 +220,7 @@ function ExtractMediaModal({ onClose }) {
         )}
 
         {extracting && (
-          <div className="p-3 mb-4 rounded border bg-light shadow-sm">
+          <div className="p-3 mb-4 rounded border bg-body-tertiary shadow-sm">
             <div className="d-flex justify-content-between align-items-center mb-2">
               <span className="fw-bold text-primary">
                 Extracting Media Files ({progress?.percent || 0}%)
@@ -242,7 +242,7 @@ function ExtractMediaModal({ onClose }) {
               {progress?.other_extracted > 0 && (
                 <Badge bg="dark">📎 Other: {progress?.other_extracted || 0}</Badge>
               )}
-              <Badge bg="light" text="dark">💾 {formatBytes(progress?.extracted_bytes || 0)} Extracted</Badge>
+              <Badge bg="secondary">💾 {formatBytes(progress?.extracted_bytes || 0)} Extracted</Badge>
             </div>
           </div>
         )}
@@ -319,7 +319,7 @@ function ExtractMediaModal({ onClose }) {
             </Form.Text>
           </Form.Group>
 
-          <div className="mb-3 p-3 bg-light rounded border">
+          <div className="mb-3 p-3 bg-body-tertiary rounded border">
             <Form.Check
               type="checkbox"
               id="group-by-conversation"

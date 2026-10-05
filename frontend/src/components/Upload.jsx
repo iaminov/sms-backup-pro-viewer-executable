@@ -115,30 +115,6 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
     setUploadPhase('sending')
 
     // Step 1a: Send the file to the server.
-    //
-    // We send the raw File as the request body via XMLHttpRequest, instead
-    // of wrapping it in FormData. FormData forces the browser to serialize
-    // the whole multipart body (boundary + file bytes) before XHR can send
-    // a single byte, which on a multi-GB file is exactly what caused the
-    // long "hangs at the start with no progress" behavior. Sending the File
-    // directly as the body lets the browser stream it from disk as it
-    // sends, while still going through XHR (not fetch()) so we get a real
-    // upload.onprogress callback -- fetch() has no equivalent: its
-    // ReadableStream bodies are drained into fetch()'s own internal buffer
-    // as fast as the source can produce chunks, with no visibility into
-    // how much has actually gone out over the wire.
-    //
-    // Note that upload.onprogress only reflects bytes handed to the OS
-    // socket, not bytes the *server* has actually read off the wire and
-    // saved to disk -- on a fast connection those can diverge a lot for a
-    // large file, so this alone would still reach 100% before the server is
-    // actually done. Step 1b (below) polls the server's own receive
-    // progress to cover that gap.
-    //
-    // The two progress sources are independent and uncoordinated, and can
-    // race and briefly disagree. Route both through this helper so the
-    // displayed number never jumps backward or flickers between stale and
-    // fresher reads.
     let displayedProgress = 0
     const reportProgress = (percent) => {
       displayedProgress = Math.max(displayedProgress, percent)
@@ -152,9 +128,6 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
       xhr.setRequestHeader('Content-Type', 'application/octet-stream')
       xhr.setRequestHeader('X-Filename', file.name)
 
-      // Browsers can fire upload.onprogress many times per second, far
-      // faster than the UI needs -- throttle how often it actually
-      // triggers a re-render so the percentage doesn't visibly flicker.
       let lastReported = 0
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return
@@ -187,13 +160,7 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
       xhr.send(file)
     })
 
-    // Step 1b: Track the server's receive/save progress in parallel with
-    // the send. The server starts reading the request body as soon as it
-    // arrives (before the whole thing is sent, and definitely before it's
-    // fully written to disk for a multi-GB file), so this can legitimately
-    // start showing progress while the XHR send is still in flight, and is
-    // what carries the bar the rest of the way once the send itself hits
-    // 100%.
+    // Step 1b: Track the server's receive/save progress in parallel with the send.
     let pollReceiveProgress = true
     const receiveProgressPromise = (async () => {
       while (pollReceiveProgress) {
@@ -205,8 +172,6 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
             setUploadPhase('saving')
             reportProgress(Math.min(100, Math.round((data.bytes_received / data.total_bytes) * 100)))
           } else if (data?.status && data.status !== 'no_upload') {
-            // Server has moved past receiving (e.g. into parsing) --
-            // nothing more for this poll loop to do.
             return
           }
         } catch (err) {
@@ -242,35 +207,30 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
 
           if (!data || data.status === 'no_upload') {
             clearInterval(checkProgress)
-            // Reject instead of resolve so the error is caught by handleUpload
             reject(new Error('Processing status unavailable'))
             return
           }
 
           setProgress(data)
 
-          // Calculate processing progress (0-100% for step 2)
           const total = data.total_messages || 1
           const processed = data.processed_messages || 0
           const processingPercent = Math.min(Math.round((processed / total) * 100), 100)
           setUploadProgress(processingPercent)
 
-          // Check if completed
           if (data.status === 'completed') {
             clearInterval(checkProgress)
-            setUploadProgress(100)
-            // Just resolve - don't call onSuccess() here since we're processing multiple files
-            // The main handleUpload() function will handle success after all files are done
-            resolve()
+            setTimeout(() => {
+              resolve()
+            }, 1000)
           } else if (data.status === 'error') {
             clearInterval(checkProgress)
-            // Reject instead of resolve so the error is caught by handleUpload
-            reject(new Error(data.error_message || 'Processing failed'))
+            reject(new Error(data.error || 'Processing failed'))
           }
         } catch (err) {
           console.error('Error checking progress:', err)
         }
-      }, 500) // Check every 500ms for more responsive updates
+      }, 500)
     })
   }
 
@@ -296,11 +256,11 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
               style={{
-                border: isDragging ? '2px dashed #0d6efd' : '2px dashed #dee2e6',
+                border: isDragging ? '2px dashed var(--bs-primary, #0d6efd)' : '2px dashed var(--bs-border-color, #dee2e6)',
                 borderRadius: '0.375rem',
                 padding: '2rem 1rem',
                 textAlign: 'center',
-                backgroundColor: isDragging ? '#f0f7ff' : '#f8f9fa',
+                backgroundColor: isDragging ? 'var(--bs-primary-bg-subtle, #f0f7ff)' : 'var(--bs-tertiary-bg, #f8f9fa)',
                 transition: 'all 0.2s ease',
                 cursor: uploading ? 'not-allowed' : 'pointer',
                 opacity: uploading ? 0.6 : 1
@@ -344,7 +304,7 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
                 />
               </div>
             </div>
-            <div className="mt-3 p-2 bg-light border rounded d-flex justify-content-between align-items-center">
+            <div className="mt-3 p-2 bg-body-tertiary border rounded d-flex justify-content-between align-items-center">
               <span className="small text-muted">
                 Want to extract raw photos, videos &amp; audio to separate folders?
               </span>
