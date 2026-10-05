@@ -156,11 +156,21 @@ func main() {
 	protected.GET("/auth/me", internal.HandleMe)
 	protected.POST("/auth/change-password", internal.HandleChangePassword)
 	protected.POST("/upload", internal.HandleUpload)
+
+	// Extract Media routes
 	protected.POST("/extract-media", internal.HandleExtractMedia)
 	protected.GET("/extract-media/progress", internal.HandleExtractMediaProgress)
 	protected.POST("/extract-media/open-folder", internal.HandleOpenMediaFolder)
 	protected.POST("/extract-media/browse-folder", internal.HandleBrowseFolder)
 	protected.POST("/extract-media/browse-file", internal.HandleBrowseXMLFile)
+
+	// Merge Backups routes
+	protected.POST("/merge-backups", internal.HandleStartMergeBackups)
+	protected.GET("/merge-backups/progress", internal.HandleGetMergeProgress)
+	protected.POST("/merge-backups/browse-folder", internal.HandleBrowseMergeFolder)
+	protected.POST("/merge-backups/browse-save-file", internal.HandleBrowseMergeSaveFile)
+	protected.POST("/merge-backups/open-output", internal.HandleOpenMergedFileFolder)
+
 	protected.GET("/conversations", internal.HandleConversations)
 	protected.GET("/messages", internal.HandleMessages)
 	protected.GET("/activity", internal.HandleActivity)

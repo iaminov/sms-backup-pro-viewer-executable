@@ -17,6 +17,7 @@ messages.db
 build-errors.log
 sbv
 sbv-server
+*.backup
 
 # Frontend dependencies and build artifacts
 frontend/node_modules/
