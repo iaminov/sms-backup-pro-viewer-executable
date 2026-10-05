@@ -78,10 +78,13 @@ func GetMergeProgress() *MergeProgress {
 func updateMergeProgress(fn func(p *MergeProgress)) {
 	mergeProgressLock.Lock()
 	defer mergeProgressLock.Unlock()
-	if mergeProgress == nil { mergeProgress = &MergeProgress{Status: "idle"} }; fn(mergeProgress)
+	if mergeProgress == nil {
+		mergeProgress = &MergeProgress{Status: "idle"}
+	}
+	fn(mergeProgress)
 }
 
-// DiscoverBackupFiles recursively finds all .xml and .zip files in the directory
+// DiscoverBackupFiles recursively finds all .xml, .zip, .backup, and Google Voice .html files in the directory
 func DiscoverBackupFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -94,6 +97,10 @@ func DiscoverBackupFiles(root string) ([]string, error) {
 		lower := strings.ToLower(path)
 		if strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".backup") {
 			files = append(files, path)
+		} else if strings.HasSuffix(lower, ".html") && !strings.HasSuffix(lower, "bills.html") {
+			if IsGoogleVoiceHTMLFile(path) {
+				files = append(files, path)
+			}
 		}
 		return nil
 	})
@@ -259,6 +266,28 @@ func computeMMSDedupKey(mms *MMSEntry, accountOpt ...string) [16]byte {
 	return res
 }
 
+// computeCallDedupKey produces a deterministic 16-byte MD5 hash for a call log
+func computeCallDedupKey(number, dateStr, callType, duration string, accountOpt ...string) [16]byte {
+	normAddr := normalizePhoneNumber(number)
+	h := md5.New()
+	h.Write([]byte("call:"))
+	if len(accountOpt) > 0 && accountOpt[0] != "" {
+		h.Write([]byte("acc:"))
+		h.Write([]byte(accountOpt[0]))
+		h.Write([]byte(":"))
+	}
+	h.Write([]byte(normAddr))
+	h.Write([]byte(":"))
+	h.Write([]byte(dateStr))
+	h.Write([]byte(":"))
+	h.Write([]byte(callType))
+	h.Write([]byte(":"))
+	h.Write([]byte(duration))
+	var res [16]byte
+	copy(res[:], h.Sum(nil))
+	return res
+}
+
 func formatNormalizedSMS(attrs []xml.Attr, schema []string, dateMs int64) []byte {
 	attrMap := make(map[string]string, len(attrs))
 	for _, a := range attrs {
@@ -383,6 +412,38 @@ func formatNormalizedMMS(elem *xml.StartElement, mms *MMSEntry, includeMedia boo
 	return []byte(sb.String())
 }
 
+func formatNormalizedCall(call *CallEntry) []byte {
+	var sb strings.Builder
+	sb.WriteString("<call")
+	sb.WriteString(" number=\"")
+	xml.EscapeText(&sb, []byte(call.Number))
+	sb.WriteString("\" duration=\"")
+	xml.EscapeText(&sb, []byte(call.Duration))
+	sb.WriteString("\" date=\"")
+	xml.EscapeText(&sb, []byte(call.Date))
+	sb.WriteString("\" type=\"")
+	xml.EscapeText(&sb, []byte(call.Type))
+	sb.WriteString("\" presentation=\"")
+	pres := call.Presentation
+	if pres == "" {
+		pres = "1"
+	}
+	xml.EscapeText(&sb, []byte(pres))
+	sb.WriteString("\" subscription_id=\"")
+	xml.EscapeText(&sb, []byte(call.SubscriptionID))
+	sb.WriteString("\" readable_date=\"")
+	xml.EscapeText(&sb, []byte(call.ReadableDate))
+	sb.WriteString("\" contact_name=\"")
+	xml.EscapeText(&sb, []byte(call.ContactName))
+	sb.WriteString("\"")
+	if call.Account != "" {
+		sb.WriteString(" account=\"")
+		xml.EscapeText(&sb, []byte(call.Account))
+		sb.WriteString("\"")
+	}
+	sb.WriteString(" />")
+	return []byte(sb.String())
+}
 
 func formatPhoneDisplay(phone string) string {
 	digits := ""
@@ -399,7 +460,7 @@ func formatPhoneDisplay(phone string) string {
 	return phone
 }
 
-// DetectMyNumbersFromBackups quickly scans XML, ZIP, and Signal backups to identify candidate "My" phone numbers
+// DetectMyNumbersFromBackups quickly scans XML, ZIP, Signal, and Google Voice backups to identify candidate "My" phone numbers
 func DetectMyNumbersFromBackups(sourceFolder string, signalPassphrase string) ([]DetectedPhoneNumber, error) {
 	files, err := DiscoverBackupFiles(sourceFolder)
 	if err != nil {
@@ -428,7 +489,32 @@ func DetectMyNumbersFromBackups(sourceFolder string, signalPassphrase string) ([
 		}
 	}
 
-	// 2. Scan XML and ZIP files
+	// 2. Check Google Voice backups (from folder or Phones.vcf)
+	gvPhone, cellPhones, err := ExtractGoogleVoiceNumber(sourceFolder)
+	if err == nil && gvPhone != "" {
+		counts[gvPhone] += 2000
+		sources[gvPhone] = fmt.Sprintf("Google Voice Account (%s)", formatPhoneDisplay(gvPhone))
+		for _, cell := range cellPhones {
+			counts[cell] += 1500
+			sources[cell] = fmt.Sprintf("Google Voice Linked Mobile (%s)", formatPhoneDisplay(cell))
+		}
+	}
+	// Check zipped Google Voice archives
+	for _, file := range files {
+		if strings.HasSuffix(strings.ToLower(file), ".zip") && IsGoogleVoiceZip(file) {
+			zipGV, zipCells, err := ExtractGoogleVoiceNumber(file)
+			if err == nil && zipGV != "" {
+				counts[zipGV] += 2000
+				sources[zipGV] = fmt.Sprintf("Google Voice Account (%s)", formatPhoneDisplay(zipGV))
+				for _, cell := range zipCells {
+					counts[cell] += 1500
+					sources[cell] = fmt.Sprintf("Google Voice Linked Mobile (%s)", formatPhoneDisplay(cell))
+				}
+			}
+		}
+	}
+
+	// 3. Scan XML and standard ZIP files
 	scannedFiles := 0
 	for _, file := range files {
 		if scannedFiles >= 40 {
@@ -442,7 +528,7 @@ func DetectMyNumbersFromBackups(sourceFolder string, signalPassphrase string) ([
 				f.Close()
 				scannedFiles++
 			}
-		} else if strings.HasSuffix(lower, ".zip") {
+		} else if strings.HasSuffix(lower, ".zip") && !IsGoogleVoiceZip(file) {
 			zr, err := zip.OpenReader(file)
 			if err == nil {
 				for _, zf := range zr.File {
@@ -484,7 +570,7 @@ func DetectMyNumbersFromBackups(sourceFolder string, signalPassphrase string) ([
 		return results[i].Count > results[j].Count
 	})
 
-	if len(results) > 0 && results[0].Count >= 50 && !strings.Contains(results[0].Source, "Signal") {
+	if len(results) > 0 && results[0].Count >= 50 && !strings.Contains(results[0].Source, "Signal") && !strings.Contains(results[0].Source, "Google Voice") {
 		results[0].Source = fmt.Sprintf("Primary Number (%d messages)", results[0].Count)
 	}
 
@@ -539,7 +625,7 @@ func scanBackupStreamForUserNumbers(r io.Reader, counts map[string]int, sources 
 	}
 }
 
-// MergeBackupsToSingleXML scans all XML/ZIP files, streams & deduplicates via temporary SQLite staging,
+// MergeBackupsToSingleXML scans all XML, ZIP, Signal, and Google Voice backups, streams & deduplicates via temporary SQLite staging,
 // and streams out a single, perfectly sorted, unified XML backup file.
 func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 	startTime := time.Now()
@@ -561,7 +647,7 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 		return nil, fmt.Errorf("failed to scan directory: %w", err)
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no .xml, .zip, or .backup files found in: %s", opts.SourceFolder)
+		return nil, fmt.Errorf("no backup files (.xml, .zip, .backup, .html) found in: %s", opts.SourceFolder)
 	}
 
 	sortFilesChronologically(files)
@@ -691,6 +777,172 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 			}
 		})
 
+		handleSMS := func(sms *SMSEntry, dateMs int64) error {
+			totalFound++
+			if isMyNumber(sms.Address) && targetNumber != "" {
+				sms.Address = targetNumber
+			}
+			if !opts.NormalizeMyNumber && fileAccount != "" && sms.Account == "" {
+				sms.Account = fileAccount
+			}
+
+			key := computeSMSDedupKey(sms.Address, sms.Date, sms.Type, sms.Body, sms.Account)
+			richness := 1
+			if sms.ContactName != "" && !strings.EqualFold(sms.ContactName, "(unknown)") && !strings.EqualFold(sms.ContactName, "null") {
+				richness = 2
+			}
+			if sms.Body != "" {
+				richness += 5
+			}
+
+			var attrs []xml.Attr
+			attrs = append(attrs,
+				xml.Attr{Name: xml.Name{Local: "protocol"}, Value: sms.Protocol},
+				xml.Attr{Name: xml.Name{Local: "address"}, Value: sms.Address},
+				xml.Attr{Name: xml.Name{Local: "date"}, Value: sms.Date},
+				xml.Attr{Name: xml.Name{Local: "type"}, Value: sms.Type},
+				xml.Attr{Name: xml.Name{Local: "subject"}, Value: sms.Subject},
+				xml.Attr{Name: xml.Name{Local: "body"}, Value: sms.Body},
+				xml.Attr{Name: xml.Name{Local: "toa"}, Value: sms.TOA},
+				xml.Attr{Name: xml.Name{Local: "sc_toa"}, Value: sms.SCTOA},
+				xml.Attr{Name: xml.Name{Local: "service_center"}, Value: sms.ServiceCenter},
+				xml.Attr{Name: xml.Name{Local: "read"}, Value: sms.Read},
+				xml.Attr{Name: xml.Name{Local: "status"}, Value: sms.Status},
+				xml.Attr{Name: xml.Name{Local: "locked"}, Value: "0"},
+				xml.Attr{Name: xml.Name{Local: "date_sent"}, Value: sms.Date},
+				xml.Attr{Name: xml.Name{Local: "sub_id"}, Value: sms.SubID},
+				xml.Attr{Name: xml.Name{Local: "readable_date"}, Value: sms.ReadableDate},
+				xml.Attr{Name: xml.Name{Local: "contact_name"}, Value: sms.ContactName},
+			)
+			if sms.Account != "" {
+				attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "account"}, Value: sms.Account})
+			}
+
+			xmlBytes := formatNormalizedSMS(attrs, smsSchema, dateMs)
+			_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
+			txCount++
+
+			if txCount >= 2000 {
+				_ = tx.Commit()
+				tx, _ = db.Begin()
+				txCount = 0
+			}
+			return nil
+		}
+
+		handleMMS := func(mms *MMSEntry, dateMs int64) error {
+			totalFound++
+			if strings.Contains(mms.Address, "~") {
+				parts := strings.Split(mms.Address, "~")
+				var cleaned []string
+				seen := make(map[string]bool)
+				for _, p := range parts {
+					trimmed := strings.TrimSpace(p)
+					if trimmed == "" || isMyNumber(trimmed) {
+						continue
+					}
+					normP := normalizePhoneNumber(trimmed)
+					if !seen[normP] {
+						seen[normP] = true
+						cleaned = append(cleaned, trimmed)
+					}
+				}
+				sort.Strings(cleaned)
+				if len(cleaned) > 0 {
+					mms.Address = strings.Join(cleaned, "~")
+				} else if targetNumber != "" {
+					mms.Address = targetNumber
+				}
+			} else if isMyNumber(mms.Address) && targetNumber != "" {
+				mms.Address = targetNumber
+			}
+
+			for i := range mms.Addrs {
+				if isMyNumber(mms.Addrs[i].Address) && targetNumber != "" {
+					mms.Addrs[i].Address = targetNumber
+				}
+			}
+
+			if !opts.NormalizeMyNumber && fileAccount != "" && mms.Account == "" {
+				mms.Account = fileAccount
+			}
+
+			key := computeMMSDedupKey(mms, mms.Account)
+
+			richness := 50
+			if opts.IncludeMedia {
+				for _, p := range mms.Parts {
+					if p.Data != "" && p.Data != "null" {
+						richness += 100
+					}
+				}
+			}
+
+			startElem := xml.StartElement{
+				Name: xml.Name{Local: "mms"},
+				Attr: []xml.Attr{
+					{Name: xml.Name{Local: "date"}, Value: mms.Date},
+					{Name: xml.Name{Local: "msg_box"}, Value: mms.Type},
+					{Name: xml.Name{Local: "read"}, Value: mms.Read},
+					{Name: xml.Name{Local: "thread_id"}, Value: mms.ThreadID},
+					{Name: xml.Name{Local: "sub"}, Value: mms.Subject},
+					{Name: xml.Name{Local: "tr_id"}, Value: mms.TrID},
+					{Name: xml.Name{Local: "ct_t"}, Value: mms.ContentType},
+					{Name: xml.Name{Local: "rr"}, Value: mms.ReadReport},
+					{Name: xml.Name{Local: "read_status"}, Value: mms.ReadStatus},
+					{Name: xml.Name{Local: "m_id"}, Value: mms.MessageID},
+					{Name: xml.Name{Local: "m_size"}, Value: mms.MessageSize},
+					{Name: xml.Name{Local: "m_type"}, Value: mms.MessageType},
+					{Name: xml.Name{Local: "sim_slot"}, Value: mms.SimSlot},
+					{Name: xml.Name{Local: "readable_date"}, Value: mms.ReadableDate},
+					{Name: xml.Name{Local: "contact_name"}, Value: mms.ContactName},
+					{Name: xml.Name{Local: "address"}, Value: mms.Address},
+					{Name: xml.Name{Local: "body"}, Value: mms.Body},
+				},
+			}
+			if mms.Account != "" {
+				startElem.Attr = append(startElem.Attr, xml.Attr{Name: xml.Name{Local: "account"}, Value: mms.Account})
+			}
+
+			xmlBytes := formatNormalizedMMS(&startElem, mms, opts.IncludeMedia)
+			_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
+			txCount++
+
+			if txCount >= 2000 {
+				_ = tx.Commit()
+				tx, _ = db.Begin()
+				txCount = 0
+			}
+			return nil
+		}
+
+		handleCall := func(call *CallEntry, dateMs int64) error {
+			totalFound++
+			if isMyNumber(call.Number) && targetNumber != "" {
+				call.Number = targetNumber
+			}
+			if !opts.NormalizeMyNumber && fileAccount != "" && call.Account == "" {
+				call.Account = fileAccount
+			}
+
+			key := computeCallDedupKey(call.Number, call.Date, call.Type, call.Duration, call.Account)
+			richness := 1
+			if call.ContactName != "" && !strings.EqualFold(call.ContactName, "(unknown)") && !strings.EqualFold(call.ContactName, "null") {
+				richness = 2
+			}
+
+			xmlBytes := formatNormalizedCall(call)
+			_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
+			txCount++
+
+			if txCount >= 2000 {
+				_ = tx.Commit()
+				tx, _ = db.Begin()
+				txCount = 0
+			}
+			return nil
+		}
+
 		processXMLStream := func(reader io.Reader) error {
 			decoder := xml.NewDecoder(reader)
 			for {
@@ -708,123 +960,30 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 				}
 
 				if startElem.Name.Local == "sms" {
-					totalFound++
-					dateStr := getAttrValue(startElem.Attr, "date")
-					dateMs, _ := strconv.ParseInt(dateStr, 10, 64)
-					addr := getAttrValue(startElem.Attr, "address")
-					if isMyNumber(addr) && targetNumber != "" {
-						addr = targetNumber
-						for i, a := range startElem.Attr {
-							if a.Name.Local == "address" {
-								startElem.Attr[i].Value = targetNumber
-							}
-						}
-					}
-					msgType := getAttrValue(startElem.Attr, "type")
-					body := getAttrValue(startElem.Attr, "body")
-					contact := getAttrValue(startElem.Attr, "contact_name")
-
-					if !opts.NormalizeMyNumber && fileAccount != "" && getAttrValue(startElem.Attr, "account") == "" {
-						startElem.Attr = append(startElem.Attr, xml.Attr{Name: xml.Name{Local: "account"}, Value: fileAccount})
-					}
-					smsAcc := getAttrValue(startElem.Attr, "account")
-					key := computeSMSDedupKey(addr, dateStr, msgType, body, smsAcc)
-					richness := 1
-					if contact != "" && !strings.EqualFold(contact, "(unknown)") && !strings.EqualFold(contact, "null") {
-						richness = 2
-					}
-
-					xmlBytes := formatNormalizedSMS(startElem.Attr, smsSchema, dateMs)
-					_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
-					txCount++
-
-					if txCount >= 2000 {
-						_ = tx.Commit()
-						tx, _ = db.Begin()
-						txCount = 0
+					var sms SMSEntry
+					if err := decoder.DecodeElement(&sms, &startElem); err == nil {
+						dateMs, _ := strconv.ParseInt(sms.Date, 10, 64)
+						_ = handleSMS(&sms, dateMs)
 					}
 				} else if startElem.Name.Local == "mms" {
-					totalFound++
 					var mms MMSEntry
 					if err := decoder.DecodeElement(&mms, &startElem); err == nil {
-						// Group MMS address normalization: exclude self from participant list
-						if strings.Contains(mms.Address, "~") {
-							parts := strings.Split(mms.Address, "~")
-							var cleaned []string
-							seen := make(map[string]bool)
-							for _, p := range parts {
-								trimmed := strings.TrimSpace(p)
-								if trimmed == "" || isMyNumber(trimmed) {
-									continue
-								}
-								normP := normalizePhoneNumber(trimmed)
-								if !seen[normP] {
-									seen[normP] = true
-									cleaned = append(cleaned, trimmed)
-								}
-							}
-							sort.Strings(cleaned)
-							if len(cleaned) > 0 {
-								mms.Address = strings.Join(cleaned, "~")
-							} else if targetNumber != "" {
-								mms.Address = targetNumber
-							}
-						} else if isMyNumber(mms.Address) && targetNumber != "" {
-							mms.Address = targetNumber
-						}
-						for i, a := range startElem.Attr {
-							if a.Name.Local == "address" {
-								startElem.Attr[i].Value = mms.Address
-							}
-						}
-
-						// Normalize MMS Addrs
-						for i := range mms.Addrs {
-							if isMyNumber(mms.Addrs[i].Address) && targetNumber != "" {
-								mms.Addrs[i].Address = targetNumber
-							}
-						}
-
 						dateMs, _ := strconv.ParseInt(mms.Date, 10, 64)
-						if !opts.NormalizeMyNumber && fileAccount != "" && mms.Account == "" {
-							mms.Account = fileAccount
-						}
-						if mms.Account != "" && getAttrValue(startElem.Attr, "account") == "" {
-							startElem.Attr = append(startElem.Attr, xml.Attr{Name: xml.Name{Local: "account"}, Value: mms.Account})
-						}
-						key := computeMMSDedupKey(&mms, mms.Account)
-
-						richness := 1
-						hasMedia := false
-						for _, p := range mms.Parts {
-							if p.Data != "" && !isTextContentType(p.ContentType) && !strings.EqualFold(p.Data, "null") {
-								hasMedia = true
-								break
-							}
-						}
-						if hasMedia {
-							richness = 10
-						}
-						if mms.ContactName != "" && !strings.EqualFold(mms.ContactName, "(unknown)") && !strings.EqualFold(mms.ContactName, "null") {
-							richness += 2
-						}
-
-						xmlBytes := formatNormalizedMMS(&startElem, &mms, opts.IncludeMedia)
-						_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
-						txCount++
-
-						if txCount >= 2000 {
-							_ = tx.Commit()
-							tx, _ = db.Begin()
-							txCount = 0
-						}
+						_ = handleMMS(&mms, dateMs)
+					}
+				} else if startElem.Name.Local == "call" {
+					var call CallEntry
+					if err := decoder.DecodeElement(&call, &startElem); err == nil {
+						dateMs, _ := strconv.ParseInt(call.Date, 10, 64)
+						_ = handleCall(&call, dateMs)
 					}
 				}
 			}
 			return nil
 		}
 
-		if strings.HasSuffix(strings.ToLower(filePath), ".backup") {
+		lowerPath := strings.ToLower(filePath)
+		if strings.HasSuffix(lowerPath, ".backup") {
 			if strings.TrimSpace(opts.SignalPassphrase) == "" {
 				return nil, fmt.Errorf("file %s is an encrypted Signal backup, but no passphrase was provided", fileName)
 			}
@@ -832,139 +991,50 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 				filePath,
 				opts.SignalPassphrase,
 				opts.IncludeMedia,
-				func(sms *SMSEntry, dateMs int64) error {
-					totalFound++
-					if isMyNumber(sms.Address) && targetNumber != "" {
-						sms.Address = targetNumber
-					}
-					var attrs []xml.Attr
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "protocol"}, Value: sms.Protocol})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "address"}, Value: sms.Address})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "date"}, Value: sms.Date})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "type"}, Value: sms.Type})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "subject"}, Value: sms.Subject})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "body"}, Value: sms.Body})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "toa"}, Value: sms.TOA})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "sc_toa"}, Value: sms.SCTOA})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "service_center"}, Value: sms.ServiceCenter})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "read"}, Value: sms.Read})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "status"}, Value: sms.Status})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "locked"}, Value: "0"})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "date_sent"}, Value: sms.Date})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "sub_id"}, Value: sms.SubID})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "readable_date"}, Value: sms.ReadableDate})
-					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "contact_name"}, Value: sms.ContactName})
-					if !opts.NormalizeMyNumber && fileAccount != "" && sms.Account == "" {
-						sms.Account = fileAccount
-					}
-					if sms.Account != "" {
-						attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "account"}, Value: sms.Account})
-					}
-
-					key := computeSMSDedupKey(sms.Address, sms.Date, sms.Type, sms.Body, sms.Account)
-					xmlBytes := formatNormalizedSMS(attrs, smsSchema, dateMs)
-					richness := 1
-					if sms.Body != "" {
-						richness += 10
-					}
-					_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
-					txCount++
-					if txCount >= 2000 {
-						_ = tx.Commit()
-						tx, _ = db.Begin()
-						txCount = 0
-					}
-					return nil
-				},
-				func(mms *MMSEntry, dateMs int64) error {
-					totalFound++
-					if strings.Contains(mms.Address, "~") {
-						parts := strings.Split(mms.Address, "~")
-						var cleaned []string
-						seen := make(map[string]bool)
-						for _, p := range parts {
-							trimmed := strings.TrimSpace(p)
-							if trimmed == "" || isMyNumber(trimmed) {
-								continue
-							}
-							normP := normalizePhoneNumber(trimmed)
-							if !seen[normP] {
-								seen[normP] = true
-								cleaned = append(cleaned, trimmed)
-							}
-						}
-						sort.Strings(cleaned)
-						if len(cleaned) > 0 {
-							mms.Address = strings.Join(cleaned, "~")
-						} else if targetNumber != "" {
-							mms.Address = targetNumber
-						}
-					} else if isMyNumber(mms.Address) && targetNumber != "" {
-						mms.Address = targetNumber
-					}
-					for i := range mms.Addrs {
-						if isMyNumber(mms.Addrs[i].Address) && targetNumber != "" {
-							mms.Addrs[i].Address = targetNumber
-						}
-					}
-					key := computeMMSDedupKey(mms)
-					startElem := xml.StartElement{
-						Name: xml.Name{Local: "mms"},
-						Attr: []xml.Attr{
-							{Name: xml.Name{Local: "date"}, Value: mms.Date},
-							{Name: xml.Name{Local: "msg_box"}, Value: mms.Type},
-							{Name: xml.Name{Local: "read"}, Value: mms.Read},
-							{Name: xml.Name{Local: "thread_id"}, Value: mms.ThreadID},
-							{Name: xml.Name{Local: "sub"}, Value: mms.Subject},
-							{Name: xml.Name{Local: "tr_id"}, Value: mms.TrID},
-							{Name: xml.Name{Local: "ct_t"}, Value: mms.ContentType},
-							{Name: xml.Name{Local: "rr"}, Value: mms.ReadReport},
-							{Name: xml.Name{Local: "read_status"}, Value: mms.ReadStatus},
-							{Name: xml.Name{Local: "m_id"}, Value: mms.MessageID},
-							{Name: xml.Name{Local: "m_size"}, Value: mms.MessageSize},
-							{Name: xml.Name{Local: "m_type"}, Value: mms.MessageType},
-							{Name: xml.Name{Local: "sim_slot"}, Value: mms.SimSlot},
-							{Name: xml.Name{Local: "readable_date"}, Value: mms.ReadableDate},
-							{Name: xml.Name{Local: "contact_name"}, Value: mms.ContactName},
-							{Name: xml.Name{Local: "address"}, Value: mms.Address},
-							{Name: xml.Name{Local: "body"}, Value: mms.Body},
-						},
-					}
-					xmlBytes := formatNormalizedMMS(&startElem, mms, opts.IncludeMedia)
-					richness := 50
-					if opts.IncludeMedia {
-						for _, p := range mms.Parts {
-							if p.Data != "" && p.Data != "null" {
-								richness += 100
-							}
-						}
-					}
-					_, _ = tx.Stmt(stmt).Exec(key[:], dateMs, richness, xmlBytes)
-					txCount++
-					if txCount >= 2000 {
-						_ = tx.Commit()
-						tx, _ = db.Begin()
-						txCount = 0
-					}
-					return nil
-				},
+				handleSMS,
+				handleMMS,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("error processing Signal backup %s: %w", fileName, err)
 			}
-		} else if strings.HasSuffix(strings.ToLower(filePath), ".zip") {
-			zReader, err := zip.OpenReader(filePath)
-			if err == nil {
-				for _, zFile := range zReader.File {
-					if strings.HasSuffix(strings.ToLower(zFile.Name), ".xml") {
-						rc, err := zFile.Open()
-						if err == nil {
-							_ = processXMLStream(rc)
-							rc.Close()
+		} else if strings.HasSuffix(lowerPath, ".zip") {
+			if IsGoogleVoiceZip(filePath) {
+				err := DecodeGoogleVoiceZip(
+					filePath,
+					opts.IncludeMedia,
+					handleSMS,
+					handleMMS,
+					handleCall,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("error processing Google Voice zip %s: %w", fileName, err)
+				}
+			} else {
+				zReader, err := zip.OpenReader(filePath)
+				if err == nil {
+					for _, zFile := range zReader.File {
+						if strings.HasSuffix(strings.ToLower(zFile.Name), ".xml") {
+							rc, err := zFile.Open()
+							if err == nil {
+								_ = processXMLStream(rc)
+								rc.Close()
+							}
 						}
 					}
+					zReader.Close()
 				}
-				zReader.Close()
+			}
+		} else if strings.HasSuffix(lowerPath, ".html") {
+			err := DecodeGoogleVoiceHTMLFile(
+				filePath,
+				opts.IncludeMedia,
+				fileAccount,
+				handleSMS,
+				handleMMS,
+				handleCall,
+			)
+			if err != nil {
+				slog.Warn("Error processing Google Voice HTML file", "file", fileName, "error", err)
 			}
 		} else {
 			f, err := os.Open(filePath)
@@ -983,7 +1053,7 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 		_ = tx.Commit()
 	}
 
-	// Count unique messages
+	// Count unique records
 	var uniqueCount int
 	_ = db.QueryRow("SELECT COUNT(*) FROM staging_records").Scan(&uniqueCount)
 	duplicatesRemoved := totalFound - uniqueCount

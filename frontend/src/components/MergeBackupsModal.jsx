@@ -76,8 +76,9 @@ function MergeBackupsModal({ onClose }) {
       const list = res.data?.numbers || []
       setDetectedNumbers(list)
       if (list.length > 0) {
+        const first = list[0].phone || list[0].number
         if (!selectedPrimaryNumber || selectedPrimaryNumber === '__custom__') {
-          setSelectedPrimaryNumber(res.data.primary_candidate || list[0].number)
+          setSelectedPrimaryNumber(res.data.primary_candidate || first)
         }
       } else {
         setDetectionMessage('No phone numbers automatically detected. You can enter your primary number manually below.')
@@ -126,7 +127,7 @@ function MergeBackupsModal({ onClose }) {
     setOpenedFolder(false)
 
     if (!sourceFolder.trim()) {
-      setError('Please select or specify the folder containing your XML, ZIP, or Signal backups.')
+      setError('Please select or specify the folder containing your XML, ZIP, Signal, or Google Voice backups.')
       return
     }
 
@@ -148,7 +149,7 @@ function MergeBackupsModal({ onClose }) {
         : (selectedPrimaryNumber || customPrimaryNumber.trim())
 
       const alternateNumbers = detectedNumbers
-        .map(n => n.number)
+        .map(n => n.phone || n.number)
         .filter(num => num && num !== targetNumber)
 
       const payload = {
@@ -202,7 +203,7 @@ function MergeBackupsModal({ onClose }) {
       </Modal.Header>
       <Modal.Body>
         <p className="text-muted small mb-3">
-          Recursively scans any folder and all its subfolders for extracted (<code>.xml</code>), compressed (<code>.zip</code>), and encrypted Signal (<code>.backup</code>) files, eliminating all duplicate messages, normalizing schema changes, and sorting chronologically into one unified XML file.
+          Recursively scans any folder and all its subfolders for standard Android (<code>.xml</code>), compressed (<code>.zip</code>), encrypted Signal (<code>.backup</code>), and Google Voice Takeout exports (HTML / <code>.zip</code>), eliminating duplicate messages &amp; calls, normalizing schemas, and sorting chronologically into one unified XML file.
         </p>
 
         {error && (
@@ -224,7 +225,7 @@ function MergeBackupsModal({ onClose }) {
             <div className="d-flex flex-wrap gap-2 mb-3">
               <Badge bg="primary" className="p-2">📁 {progress.processed_files} Backup Files Processed</Badge>
               <Badge bg="info" className="p-2">🔍 {progress.total_found_messages.toLocaleString()} Total Scanned</Badge>
-              <Badge bg="warning" text="dark" className="p-2">✨ {progress.unique_messages.toLocaleString()} Unique Messages</Badge>
+              <Badge bg="warning" text="dark" className="p-2">✨ {progress.unique_messages.toLocaleString()} Unique Records</Badge>
               <Badge bg="danger" className="p-2">🗑️ {progress.duplicates_removed.toLocaleString()} Duplicates Removed</Badge>
               <Badge bg="secondary" className="p-2">💾 {formatBytes(progress.output_size)} Output Size</Badge>
             </div>
@@ -296,7 +297,7 @@ function MergeBackupsModal({ onClose }) {
               </Button>
             </div>
             <Form.Text className="text-muted">
-              Recursively finds all <code>.xml</code>, <code>.zip</code>, and <code>.backup</code> files inside this directory and all nested subfolders.
+              Recursively finds all <code>.xml</code>, <code>.zip</code>, Signal <code>.backup</code>, and Google Voice Takeout files inside this directory and all nested subfolders.
             </Form.Text>
           </Form.Group>
 
@@ -365,7 +366,7 @@ function MergeBackupsModal({ onClose }) {
               className="mb-1"
             />
             <p className="text-muted small ms-4 mb-2">
-              Essential if you changed phone numbers, switched SIM cards, or have backups from different devices. Prevents group chats and messages from splintering into separate threads by standardizing participant lists and merging conversations seamlessly.
+              Essential if you changed phone numbers, switched SIM cards, or have backups from multiple services (Signal, Google Voice, SMS). Standardizes participant lists and merges conversations seamlessly.
             </p>
 
             {normalizeMyNumber && (
@@ -399,11 +400,16 @@ function MergeBackupsModal({ onClose }) {
                     disabled={merging || detectingNumbers}
                     className="mb-2"
                   >
-                    {detectedNumbers.map((item) => (
-                      <option key={item.number} value={item.number}>
-                        {item.display || item.number} ({item.count.toLocaleString()} msgs{item.sources && item.sources.length > 0 ? ` · ${item.sources.join(', ')}` : ''})
-                      </option>
-                    ))}
+                    {detectedNumbers.map((item) => {
+                      const num = item.phone || item.number
+                      const disp = item.formatted || item.display || num
+                      const src = item.source || (item.sources ? item.sources.join(', ') : '')
+                      return (
+                        <option key={num} value={num}>
+                          {disp} ({item.count ? item.count.toLocaleString() : 0} msgs{src ? ` · ${src}` : ''})
+                        </option>
+                      )
+                    })}
                     <option value="__custom__">Custom / Enter Manually...</option>
                   </Form.Select>
                 ) : (
@@ -426,7 +432,7 @@ function MergeBackupsModal({ onClose }) {
 
                 {detectedNumbers.length > 1 && selectedPrimaryNumber !== '__custom__' && (
                   <div className="small text-muted mt-1">
-                    ℹ️ Other detected numbers ({detectedNumbers.filter(n => n.number !== selectedPrimaryNumber).map(n => n.display || n.number).join(', ')}) will be recognized as your former numbers and normalized to your primary identity.
+                    ℹ️ Other detected numbers ({detectedNumbers.filter(n => (n.phone || n.number) !== selectedPrimaryNumber).map(n => n.formatted || n.display || n.phone || n.number).join(', ')}) will be recognized as your former numbers and normalized to your primary identity.
                   </div>
                 )}
               </div>
