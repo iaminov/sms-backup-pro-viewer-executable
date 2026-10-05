@@ -276,3 +276,145 @@ func TestMergeWithSignalBackup(t *testing.T) {
 		t.Fatalf("Merged output file is empty or missing: %v", err)
 	}
 }
+
+func TestDetectMyNumbersFromBackups(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sbv_test_detect_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// XML with incoming MMS where 151 is +16462447741
+	xmlData := `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<smses count="2">
+  <mms date="1000" type="1" msg_box="1" address="+15551234567" contact_name="Alice" ct_t="application/vnd.wap.mms-message">
+    <parts><part ct="text/plain" text="Hey" /></parts>
+    <addrs>
+      <addr address="+15551234567" type="137" />
+      <addr address="+16462447741" type="151" />
+    </addrs>
+  </mms>
+  <mms date="2000" type="2" msg_box="2" address="+15551234567" contact_name="Alice" ct_t="application/vnd.wap.mms-message">
+    <parts><part ct="text/plain" text="Reply" /></parts>
+    <addrs>
+      <addr address="+16462447741" type="137" />
+      <addr address="+15551234567" type="151" />
+    </addrs>
+  </mms>
+</smses>`
+
+	xmlPath := filepath.Join(tempDir, "backup.xml")
+	if err := os.WriteFile(xmlPath, []byte(xmlData), 0644); err != nil {
+		t.Fatalf("Failed to write xml: %v", err)
+	}
+
+	numbers, err := DetectMyNumbersFromBackups(tempDir, "")
+	if err != nil {
+		t.Fatalf("DetectMyNumbersFromBackups failed: %v", err)
+	}
+
+	if len(numbers) == 0 {
+		t.Fatalf("Expected detected numbers, got 0")
+	}
+
+	found := false
+	for _, n := range numbers {
+		if n.Phone == "+16462447741" {
+			found = true
+			if !strings.Contains(n.Formatted, "646") {
+				t.Errorf("Expected formatted string to contain 646, got %s", n.Formatted)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected to detect +16462447741, got %+v", numbers)
+	}
+}
+
+func TestMergeWithNumberNormalization(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sbv_test_norm_merge_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Backup 1 (From old phone: 917-275-4055):
+	// Group chat with Alice (555-1111) and Bob (555-2222).
+	// On old phone, address is "5551111~5552222".
+	xml1 := `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<smses count="1">
+  <mms date="1000" type="1" msg_box="1" address="+15551111111~+15552222222" contact_name="Group Chat" ct_t="application/vnd.wap.mms-message">
+    <parts><part ct="text/plain" text="Group message 1" /></parts>
+    <addrs>
+      <addr address="+15551111111" type="137" />
+      <addr address="+15552222222" type="151" />
+      <addr address="+19172754055" type="151" />
+    </addrs>
+  </mms>
+</smses>`
+
+	// Backup 2 (From new phone: 646-244-7741):
+	// Alice sent the exact same message, but this phone sees old phone number as a participant!
+	// address is "+15551111111~+15552222222~+19172754055".
+	xml2 := `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<smses count="1">
+  <mms date="1000" type="1" msg_box="1" address="+15551111111~+15552222222~+19172754055" contact_name="Group Chat" ct_t="application/vnd.wap.mms-message">
+    <parts><part ct="text/plain" text="Group message 1" /></parts>
+    <addrs>
+      <addr address="+15551111111" type="137" />
+      <addr address="+15552222222" type="151" />
+      <addr address="+19172754055" type="151" />
+    </addrs>
+  </mms>
+</smses>`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "old_backup.xml"), []byte(xml1), 0644); err != nil {
+		t.Fatalf("Failed to write old_backup.xml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "new_backup.xml"), []byte(xml2), 0644); err != nil {
+		t.Fatalf("Failed to write new_backup.xml: %v", err)
+	}
+
+	outputPath := filepath.Join(tempDir, "normalized_merged.xml")
+	opts := MergeOptions{
+		SourceFolder:       tempDir,
+		OutputFile:         outputPath,
+		IncludeMedia:       true,
+		NormalizeSchema:    true,
+		NormalizeMyNumber:  true,
+		TargetMyNumber:     "+16462447741",
+		AlternateMyNumbers: []string{"+19172754055"},
+	}
+
+	prog, err := MergeBackupsToSingleXML(opts)
+	if err != nil {
+		t.Fatalf("MergeBackupsToSingleXML failed: %v", err)
+	}
+
+	// Total found was 2, but because the old number was normalized out of the group address,
+	// they should both produce address "+15551111111~+15552222222" and deduplicate into 1 unique message!
+	if prog.TotalFoundMessages != 2 {
+		t.Errorf("Expected 2 found messages, got %d", prog.TotalFoundMessages)
+	}
+	if prog.UniqueMessages != 1 {
+		t.Errorf("Expected 1 unique message after normalization deduplication, got %d", prog.UniqueMessages)
+	}
+	if prog.DuplicatesRemoved != 1 {
+		t.Errorf("Expected 1 duplicate removed, got %d", prog.DuplicatesRemoved)
+	}
+
+	outBytes, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("Failed to read output: %v", err)
+	}
+	outStr := string(outBytes)
+
+	// Verify the group address in the merged output no longer contains the old number +19172754055
+	if strings.Contains(outStr, "+15551111111~+15552222222~+19172754055") {
+		t.Errorf("Merged XML should have normalized group address, but found old address string")
+	}
+	if !strings.Contains(outStr, "+15551111111~+15552222222") {
+		t.Errorf("Merged XML should contain clean group address '+15551111111~+15552222222'")
+	}
+}

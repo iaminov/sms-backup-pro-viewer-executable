@@ -21,6 +21,7 @@ This project integrates the interactive web interface and SQLite indexing of **[
 - **Multi-Format Backup Merger (SMS Backup & Restore XML/ZIP & Signal Backups)**:
   - **Recursive Multi-Format Discovery**: Select any root folder, and SBV automatically scans all folders and subfolders for extracted (`.xml`), compressed (`.zip`), and encrypted Signal (`.backup`) files.
   - **Encrypted Signal Android Backup Support**: Decrypts Signal `.backup` archives on the fly using your 30-digit passphrase via AES-256-CTR, HMAC-SHA256, and 250,000-round PBKDF2/HKDF key derivation. Automatically reconstructs Signal SMS, group MMS chats, sender/recipient identities, and media attachments into standard SMS Backup & Restore XML records.
+  - **Phone Number Normalization ("My Number" Merging)**: If you changed phone numbers over the years or switched SIM cards, group MMS threads often fragment because older backups list your previous number in the participant address string (`Alice~Bob~OldNumber`) while newer backups list `Alice~Bob`. SBV automatically scans all your backups to detect your current and former phone numbers, strips former/alternate numbers from group chats, and aligns participant addresses so conversations merge seamlessly into single continuous threads without splitting or duplicates.
   - **Complete Deduplication**: Detects and eliminates 100% of duplicate SMS and MMS messages across overlapping or fragmented backup archives, intelligently preserving the richest record (e.g. valid contact names over `(Unknown)` and media parts).
   - **Strict Chronological Ordering**: Properly orders interleaved messages across all backups from earliest to latest based on message timestamp.
   - **Schema Normalization**: Automatically samples the newest backup file in your collection and normalizes legacy XML schemas into a single unified format.
@@ -74,8 +75,12 @@ This project integrates the interactive web interface and SQLite indexing of **[
 - Click the **Merge Backups** button in the top navigation bar.
 - Click **Browse Folder** to pick the directory containing your `.xml`, `.zip`, and/or `.backup` archives (SBV recursively traverses all subfolders).
 - **Signal Backup Passphrase**: If you have encrypted Signal `.backup` files in the folder, enter your 30-digit passphrase (e.g. `31889 30544 62782 17192 51469 48815`). The app will decrypt and convert Signal chats directly into the standard SMS/MMS structure.
+- **Normalize 'My' Phone Number**: Enabled by default.
+  - Automatically scans your backup files to detect your current and previous phone numbers across MMS headers and Signal records.
+  - Use the dropdown to select which number is your current/primary identity (or enter a custom number).
+  - All alternate/former phone numbers are automatically recognized as "you" and excluded from group chat addresses (`Alice~Bob~OldNumber` &rarr; `Alice~Bob`), unifying fragmented conversations and eliminating duplicate messages across number changes.
 - Choose your output destination (defaults to `merged-sms-backup.xml` in your selected directory).
-- Configure your merge options:
+- Configure additional merge options:
   - **Include Media in Output XML**: Checked by default. Toggle off to strip heavy base64 data attributes for a compact, text-only backup file.
   - **Normalize Schema**: Checked by default. Adapts older backup schemas to match the latest Android schema format.
 - Click **Start Merge & Deduplication**. Watch real-time progress as backups are parsed, duplicates removed, and sorted.
@@ -114,7 +119,6 @@ The script will automatically:
 5. Recursively discover and bundle all required native Windows DLLs alongside `sbv.exe`.
 6. Package the final standalone distribution into `SBV-Windows-Portable` and `SBV-Windows-Portable.zip`.
 
-
 ---
 
 ## Repository Layout & Streamlined Architecture
@@ -122,7 +126,7 @@ The script will automatically:
 The repository is organized to maintain a clean separation between source code, build scripts, and portable distribution artifacts:
 
 - **`Build-SBV-Windows.ps1`**: The single root PowerShell build script. Automates toolchain checks, native CGO/libheif dependencies, frontend compilation, executable building, DLL dependency harvesting, and portable packaging.
-- **`main.go` & `internal/`**: The core Go backend service (streaming XML parser, SQLite FTS5 database, media extraction engine, Signal backup decryption, and multi-format deduplication merger).
+- **`main.go` & `internal/`**: The core Go backend service (streaming XML parser, SQLite FTS5 database, media extraction engine, Signal backup decryption, phone number normalization, and multi-format deduplication merger).
 - **`frontend/`**: The React 19 web application (Vite, Bootstrap, Recharts, lazy media viewer, modals).
 - **`SBV-Windows-Builder/`**: Output directory for build artifacts:
   - **`SBV-Windows-Portable/`**: The standalone Windows distribution containing `sbv.exe`, `Start SBV.cmd`, precompiled `frontend/dist/`, and all bundled native UCRT64 codec DLLs (`libheif.dll`, `libde265.dll`, `libx265.dll`, etc.).

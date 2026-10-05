@@ -26,11 +26,21 @@ import (
 )
 
 type MergeOptions struct {
-	SourceFolder     string `json:"source_folder"`
-	OutputFile       string `json:"output_file"`
-	IncludeMedia     bool   `json:"include_media"`
-	NormalizeSchema  bool   `json:"normalize_schema"`
-	SignalPassphrase string `json:"signal_passphrase"`
+	SourceFolder       string   `json:"source_folder"`
+	OutputFile         string   `json:"output_file"`
+	IncludeMedia       bool     `json:"include_media"`
+	NormalizeSchema    bool     `json:"normalize_schema"`
+	SignalPassphrase   string   `json:"signal_passphrase"`
+	NormalizeMyNumber  bool     `json:"normalize_my_number"`
+	TargetMyNumber     string   `json:"target_my_number"`
+	AlternateMyNumbers []string `json:"alternate_my_numbers"`
+}
+
+type DetectedPhoneNumber struct {
+	Phone     string `json:"phone"`
+	Formatted string `json:"formatted"`
+	Count     int    `json:"count"`
+	Source    string `json:"source"`
 }
 
 type MergeProgress struct {
@@ -363,6 +373,162 @@ func formatNormalizedMMS(elem *xml.StartElement, mms *MMSEntry, includeMedia boo
 	return []byte(sb.String())
 }
 
+
+func formatPhoneDisplay(phone string) string {
+	digits := ""
+	for _, r := range phone {
+		if r >= '0' && r <= '9' {
+			digits += string(r)
+		}
+	}
+	if len(digits) == 10 {
+		return fmt.Sprintf("+1 (%s) %s-%s", digits[:3], digits[3:6], digits[6:])
+	} else if len(digits) == 11 && digits[0] == '1' {
+		return fmt.Sprintf("+1 (%s) %s-%s", digits[1:4], digits[4:7], digits[7:])
+	}
+	return phone
+}
+
+// DetectMyNumbersFromBackups quickly scans XML, ZIP, and Signal backups to identify candidate "My" phone numbers
+func DetectMyNumbersFromBackups(sourceFolder string, signalPassphrase string) ([]DetectedPhoneNumber, error) {
+	files, err := DiscoverBackupFiles(sourceFolder)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no backup files found in: %s", sourceFolder)
+	}
+
+	counts := make(map[string]int)
+	sources := make(map[string]string)
+
+	// 1. Check Signal backups
+	for _, file := range files {
+		if IsSignalBackup(file) && strings.TrimSpace(signalPassphrase) != "" {
+			selfPhone, selfName, err := ExtractSignalSelfPhone(file, signalPassphrase)
+			if err == nil && selfPhone != "" {
+				norm := normalizePhoneNumber(selfPhone)
+				counts[norm] += 1000
+				disp := "Signal Account (Self)"
+				if selfName != "" {
+					disp = fmt.Sprintf("Signal Account (%s)", selfName)
+				}
+				sources[norm] = disp
+			}
+		}
+	}
+
+	// 2. Scan XML and ZIP files
+	scannedFiles := 0
+	for _, file := range files {
+		if scannedFiles >= 40 {
+			break
+		}
+		lower := strings.ToLower(file)
+		if strings.HasSuffix(lower, ".xml") {
+			f, err := os.Open(file)
+			if err == nil {
+				scanBackupStreamForUserNumbers(f, counts, sources)
+				f.Close()
+				scannedFiles++
+			}
+		} else if strings.HasSuffix(lower, ".zip") {
+			zr, err := zip.OpenReader(file)
+			if err == nil {
+				for _, zf := range zr.File {
+					if strings.HasSuffix(strings.ToLower(zf.Name), ".xml") {
+						rc, err := zf.Open()
+						if err == nil {
+							scanBackupStreamForUserNumbers(rc, counts, sources)
+							rc.Close()
+							scannedFiles++
+							if scannedFiles >= 40 {
+								break
+							}
+						}
+					}
+				}
+				zr.Close()
+			}
+		}
+	}
+
+	var results []DetectedPhoneNumber
+	for phone, cnt := range counts {
+		if cnt < 2 && sources[phone] == "" {
+			continue
+		}
+		src := sources[phone]
+		if src == "" {
+			src = "SMS/MMS Backups"
+		}
+		results = append(results, DetectedPhoneNumber{
+			Phone:     phone,
+			Formatted: formatPhoneDisplay(phone),
+			Count:     cnt,
+			Source:    src,
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Count > results[j].Count
+	})
+
+	if len(results) > 0 && results[0].Count >= 50 && !strings.Contains(results[0].Source, "Signal") {
+		results[0].Source = fmt.Sprintf("Primary Number (%d messages)", results[0].Count)
+	}
+
+	return results, nil
+}
+
+func scanBackupStreamForUserNumbers(r io.Reader, counts map[string]int, sources map[string]string) {
+	dec := xml.NewDecoder(r)
+	mmsCount := 0
+	for mmsCount < 200 {
+		token, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if se.Name.Local == "mms" {
+			mmsCount++
+			var mms MMSEntry
+			if err := dec.DecodeElement(&mms, &se); err == nil {
+				// Incoming 1-on-1 MMS: recipient (151) is the user
+				if mms.Type == "1" && !strings.Contains(mms.Address, "~") {
+					for _, addr := range mms.Addrs {
+						if addr.Type == "151" {
+							raw := strings.TrimSpace(addr.Address)
+							if raw != "" && raw != "insert-address-token" && !strings.Contains(raw, "@") && raw != mms.Address {
+								norm := normalizePhoneNumber(raw)
+								if norm != "" {
+									counts[norm]++
+								}
+							}
+						}
+					}
+				} else if mms.Type == "2" {
+					// Outgoing MMS: sender (137) is the user
+					for _, addr := range mms.Addrs {
+						if addr.Type == "137" {
+							raw := strings.TrimSpace(addr.Address)
+							if raw != "" && raw != "insert-address-token" && !strings.Contains(raw, "@") {
+								norm := normalizePhoneNumber(raw)
+								if norm != "" {
+									counts[norm] += 5
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // MergeBackupsToSingleXML scans all XML/ZIP files, streams & deduplicates via temporary SQLite staging,
 // and streams out a single, perfectly sorted, unified XML backup file.
 func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
@@ -438,6 +604,59 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 
 	smsSchema := getStandardSMSAttrs()
 
+	var isMyNumber func(string) bool
+	var targetNumber string
+
+	if opts.NormalizeMyNumber {
+		targetNumber = normalizePhoneNumber(opts.TargetMyNumber)
+		myAliases := make(map[string]bool)
+
+		// Auto-detect numbers from backups
+		detected, _ := DetectMyNumbersFromBackups(opts.SourceFolder, opts.SignalPassphrase)
+		if targetNumber == "" && len(detected) > 0 {
+			targetNumber = normalizePhoneNumber(detected[0].Phone)
+		}
+
+		if targetNumber != "" {
+			myAliases[targetNumber] = true
+			myAliases[strings.TrimPrefix(targetNumber, "+1")] = true
+		}
+		for _, num := range opts.AlternateMyNumbers {
+			n := normalizePhoneNumber(num)
+			if n != "" {
+				myAliases[n] = true
+				myAliases[strings.TrimPrefix(n, "+1")] = true
+			}
+		}
+		for _, d := range detected {
+			n := normalizePhoneNumber(d.Phone)
+			if n != "" {
+				myAliases[n] = true
+				myAliases[strings.TrimPrefix(n, "+1")] = true
+			}
+		}
+
+		slog.Info("Normalized 'My Number' enabled", "target", targetNumber, "aliases", len(myAliases))
+
+		isMyNumber = func(phone string) bool {
+			trimmed := strings.TrimSpace(phone)
+			if trimmed == "" || strings.EqualFold(trimmed, "insert-address-token") || strings.Contains(trimmed, "@") {
+				return false
+			}
+			norm := normalizePhoneNumber(trimmed)
+			if myAliases[norm] {
+				return true
+			}
+			base := strings.TrimPrefix(norm, "+1")
+			if base != "" && myAliases[base] {
+				return true
+			}
+			return false
+		}
+	} else {
+		isMyNumber = func(phone string) bool { return false }
+	}
+
 	var totalFound int
 	var tx *sql.Tx
 	txCount := 0
@@ -479,6 +698,14 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 					dateStr := getAttrValue(startElem.Attr, "date")
 					dateMs, _ := strconv.ParseInt(dateStr, 10, 64)
 					addr := getAttrValue(startElem.Attr, "address")
+					if isMyNumber(addr) && targetNumber != "" {
+						addr = targetNumber
+						for i, a := range startElem.Attr {
+							if a.Name.Local == "address" {
+								startElem.Attr[i].Value = targetNumber
+							}
+						}
+					}
 					msgType := getAttrValue(startElem.Attr, "type")
 					body := getAttrValue(startElem.Attr, "body")
 					contact := getAttrValue(startElem.Attr, "contact_name")
@@ -502,6 +729,44 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 					totalFound++
 					var mms MMSEntry
 					if err := decoder.DecodeElement(&mms, &startElem); err == nil {
+						// Group MMS address normalization: exclude self from participant list
+						if strings.Contains(mms.Address, "~") {
+							parts := strings.Split(mms.Address, "~")
+							var cleaned []string
+							seen := make(map[string]bool)
+							for _, p := range parts {
+								trimmed := strings.TrimSpace(p)
+								if trimmed == "" || isMyNumber(trimmed) {
+									continue
+								}
+								normP := normalizePhoneNumber(trimmed)
+								if !seen[normP] {
+									seen[normP] = true
+									cleaned = append(cleaned, trimmed)
+								}
+							}
+							sort.Strings(cleaned)
+							if len(cleaned) > 0 {
+								mms.Address = strings.Join(cleaned, "~")
+							} else if targetNumber != "" {
+								mms.Address = targetNumber
+							}
+						} else if isMyNumber(mms.Address) && targetNumber != "" {
+							mms.Address = targetNumber
+						}
+						for i, a := range startElem.Attr {
+							if a.Name.Local == "address" {
+								startElem.Attr[i].Value = mms.Address
+							}
+						}
+
+						// Normalize MMS Addrs
+						for i := range mms.Addrs {
+							if isMyNumber(mms.Addrs[i].Address) && targetNumber != "" {
+								mms.Addrs[i].Address = targetNumber
+							}
+						}
+
 						dateMs, _ := strconv.ParseInt(mms.Date, 10, 64)
 						key := computeMMSDedupKey(&mms)
 
@@ -545,6 +810,9 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 				opts.IncludeMedia,
 				func(sms *SMSEntry, dateMs int64) error {
 					totalFound++
+					if isMyNumber(sms.Address) && targetNumber != "" {
+						sms.Address = targetNumber
+					}
 					var attrs []xml.Attr
 					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "protocol"}, Value: sms.Protocol})
 					attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "address"}, Value: sms.Address})
@@ -580,6 +848,35 @@ func MergeBackupsToSingleXML(opts MergeOptions) (*MergeProgress, error) {
 				},
 				func(mms *MMSEntry, dateMs int64) error {
 					totalFound++
+					if strings.Contains(mms.Address, "~") {
+						parts := strings.Split(mms.Address, "~")
+						var cleaned []string
+						seen := make(map[string]bool)
+						for _, p := range parts {
+							trimmed := strings.TrimSpace(p)
+							if trimmed == "" || isMyNumber(trimmed) {
+								continue
+							}
+							normP := normalizePhoneNumber(trimmed)
+							if !seen[normP] {
+								seen[normP] = true
+								cleaned = append(cleaned, trimmed)
+							}
+						}
+						sort.Strings(cleaned)
+						if len(cleaned) > 0 {
+							mms.Address = strings.Join(cleaned, "~")
+						} else if targetNumber != "" {
+							mms.Address = targetNumber
+						}
+					} else if isMyNumber(mms.Address) && targetNumber != "" {
+						mms.Address = targetNumber
+					}
+					for i := range mms.Addrs {
+						if isMyNumber(mms.Addrs[i].Address) && targetNumber != "" {
+							mms.Addrs[i].Address = targetNumber
+						}
+					}
 					key := computeMMSDedupKey(mms)
 					startElem := xml.StartElement{
 						Name: xml.Name{Local: "mms"},
@@ -881,4 +1178,28 @@ func HandleOpenMergedFileFolder(c echo.Context) error {
 
 	_ = cmd.Start()
 	return c.JSON(http.StatusOK, map[string]interface{}{"success": true, "path": target})
+}
+
+// HandleDetectMergeNumbers handles requests to scan backup files and identify candidate user phone numbers
+func HandleDetectMergeNumbers(c echo.Context) error {
+	var req struct {
+		SourceFolder     string `json:"source_folder"`
+		SignalPassphrase string `json:"signal_passphrase"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "Invalid request format"})
+	}
+	if strings.TrimSpace(req.SourceFolder) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "source_folder is required"})
+	}
+
+	numbers, err := DetectMyNumbersFromBackups(req.SourceFolder, req.SignalPassphrase)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"success": true,
+		"numbers": numbers,
+	})
 }

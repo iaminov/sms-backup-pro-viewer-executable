@@ -9,6 +9,12 @@ function MergeBackupsModal({ onClose }) {
   const [outputFile, setOutputFile] = useState('')
   const [includeMedia, setIncludeMedia] = useState(true)
   const [normalizeSchema, setNormalizeSchema] = useState(true)
+  const [normalizeMyNumber, setNormalizeMyNumber] = useState(true)
+  const [detectedNumbers, setDetectedNumbers] = useState([])
+  const [selectedPrimaryNumber, setSelectedPrimaryNumber] = useState('')
+  const [customPrimaryNumber, setCustomPrimaryNumber] = useState('')
+  const [detectingNumbers, setDetectingNumbers] = useState(false)
+  const [detectionMessage, setDetectionMessage] = useState('')
   const [signalPassphrase, setSignalPassphrase] = useState('')
   const [showSignalPassphrase, setShowSignalPassphrase] = useState(false)
 
@@ -57,6 +63,32 @@ function MergeBackupsModal({ onClose }) {
     }, 400)
   }
 
+  const handleDetectNumbers = async (folder, passphrase) => {
+    const f = folder || sourceFolder
+    if (!f || !f.trim()) return
+    try {
+      setDetectingNumbers(true)
+      setDetectionMessage('')
+      const res = await axios.post(`${API_BASE}/merge-backups/detect-numbers`, {
+        source_folder: f.trim(),
+        signal_passphrase: (passphrase !== undefined ? passphrase : signalPassphrase).trim()
+      })
+      const list = res.data?.numbers || []
+      setDetectedNumbers(list)
+      if (list.length > 0) {
+        if (!selectedPrimaryNumber || selectedPrimaryNumber === '__custom__') {
+          setSelectedPrimaryNumber(res.data.primary_candidate || list[0].number)
+        }
+      } else {
+        setDetectionMessage('No phone numbers automatically detected. You can enter your primary number manually below.')
+      }
+    } catch (err) {
+      console.warn('Failed to detect candidate numbers:', err)
+    } finally {
+      setDetectingNumbers(false)
+    }
+  }
+
   const handleBrowseFolder = async () => {
     try {
       setBrowsingFolder(true)
@@ -66,6 +98,7 @@ function MergeBackupsModal({ onClose }) {
         if (!outputFile) {
           setOutputFile(`${res.data.path}\\merged-sms-backup.xml`)
         }
+        handleDetectNumbers(res.data.path, signalPassphrase)
       }
     } catch (err) {
       console.error('Failed to browse folder:', err)
@@ -93,7 +126,7 @@ function MergeBackupsModal({ onClose }) {
     setOpenedFolder(false)
 
     if (!sourceFolder.trim()) {
-      setError('Please select or specify the folder containing your XML and ZIP backups.')
+      setError('Please select or specify the folder containing your XML, ZIP, or Signal backups.')
       return
     }
 
@@ -110,12 +143,23 @@ function MergeBackupsModal({ onClose }) {
     })
 
     try {
+      const targetNumber = selectedPrimaryNumber === '__custom__'
+        ? customPrimaryNumber.trim()
+        : (selectedPrimaryNumber || customPrimaryNumber.trim())
+
+      const alternateNumbers = detectedNumbers
+        .map(n => n.number)
+        .filter(num => num && num !== targetNumber)
+
       const payload = {
         source_folder: sourceFolder.trim(),
         output_file: outputFile.trim(),
         include_media: includeMedia,
         normalize_schema: normalizeSchema,
-        signal_passphrase: signalPassphrase.trim()
+        signal_passphrase: signalPassphrase.trim(),
+        normalize_my_number: normalizeMyNumber,
+        target_my_number: targetNumber,
+        alternate_my_numbers: alternateNumbers
       }
       await axios.post(`${API_BASE}/merge-backups`, payload)
       startPolling()
@@ -252,7 +296,7 @@ function MergeBackupsModal({ onClose }) {
               </Button>
             </div>
             <Form.Text className="text-muted">
-              Recursively finds all <code>.xml</code> and <code>.zip</code> backups inside this directory and all nested subfolders.
+              Recursively finds all <code>.xml</code>, <code>.zip</code>, and <code>.backup</code> files inside this directory and all nested subfolders.
             </Form.Text>
           </Form.Group>
 
@@ -309,6 +353,84 @@ function MergeBackupsModal({ onClose }) {
           {/* Options */}
           <div className="p-3 bg-body-tertiary rounded border mb-3">
             <Form.Label className="fw-semibold mb-2">Merge Configuration</Form.Label>
+
+            {/* Normalize My Phone Number */}
+            <Form.Check
+              type="switch"
+              id="normalize-number-toggle"
+              label="Normalize 'My' Phone Number (Handles Phone Number Changes & Merges)"
+              checked={normalizeMyNumber}
+              onChange={(e) => setNormalizeMyNumber(e.target.checked)}
+              disabled={merging}
+              className="mb-1"
+            />
+            <p className="text-muted small ms-4 mb-2">
+              Essential if you changed phone numbers, switched SIM cards, or have backups from different devices. Prevents group chats and messages from splintering into separate threads by standardizing participant lists and merging conversations seamlessly.
+            </p>
+
+            {normalizeMyNumber && (
+              <div className="ms-4 p-3 bg-white border rounded mb-3">
+                <div className="d-flex justify-content-between align-items-center mb-2">
+                  <Form.Label className="fw-semibold mb-0 small">Primary Phone Number ("Me")</Form.Label>
+                  <Button
+                    variant="outline-secondary"
+                    size="sm"
+                    onClick={() => handleDetectNumbers(sourceFolder, signalPassphrase)}
+                    disabled={merging || detectingNumbers || !sourceFolder.trim()}
+                    className="py-0 px-2"
+                    style={{ fontSize: '0.75rem' }}
+                  >
+                    {detectingNumbers ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true" style={{ width: '0.7rem', height: '0.7rem' }}></span>
+                        Detecting...
+                      </>
+                    ) : (
+                      '🔍 Detect Numbers'
+                    )}
+                  </Button>
+                </div>
+
+                {detectedNumbers.length > 0 ? (
+                  <Form.Select
+                    size="sm"
+                    value={selectedPrimaryNumber}
+                    onChange={(e) => setSelectedPrimaryNumber(e.target.value)}
+                    disabled={merging || detectingNumbers}
+                    className="mb-2"
+                  >
+                    {detectedNumbers.map((item) => (
+                      <option key={item.number} value={item.number}>
+                        {item.display || item.number} ({item.count.toLocaleString()} msgs{item.sources && item.sources.length > 0 ? ` · ${item.sources.join(', ')}` : ''})
+                      </option>
+                    ))}
+                    <option value="__custom__">Custom / Enter Manually...</option>
+                  </Form.Select>
+                ) : (
+                  <div className="text-muted small mb-2 fst-italic">
+                    {detectingNumbers ? 'Scanning backups for phone numbers...' : (detectionMessage || 'Select a folder or click "Detect Numbers" to scan candidate phone numbers.')}
+                  </div>
+                )}
+
+                {(selectedPrimaryNumber === '__custom__' || detectedNumbers.length === 0) && (
+                  <Form.Control
+                    type="text"
+                    size="sm"
+                    placeholder="Enter your phone number (e.g. +1 555-123-4567)"
+                    value={customPrimaryNumber}
+                    onChange={(e) => setCustomPrimaryNumber(e.target.value)}
+                    disabled={merging}
+                    className="mt-1"
+                  />
+                )}
+
+                {detectedNumbers.length > 1 && selectedPrimaryNumber !== '__custom__' && (
+                  <div className="small text-muted mt-1">
+                    ℹ️ Other detected numbers ({detectedNumbers.filter(n => n.number !== selectedPrimaryNumber).map(n => n.display || n.number).join(', ')}) will be recognized as your former numbers and normalized to your primary identity.
+                  </div>
+                )}
+              </div>
+            )}
 
             <Form.Check
               type="switch"

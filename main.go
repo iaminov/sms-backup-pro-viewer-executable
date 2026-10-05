@@ -170,6 +170,7 @@ func main() {
 	protected.POST("/merge-backups/browse-folder", internal.HandleBrowseMergeFolder)
 	protected.POST("/merge-backups/browse-save-file", internal.HandleBrowseMergeSaveFile)
 	protected.POST("/merge-backups/open-output", internal.HandleOpenMergedFileFolder)
+	protected.POST("/merge-backups/detect-numbers", internal.HandleDetectMergeNumbers)
 
 	protected.GET("/conversations", internal.HandleConversations)
 	protected.GET("/messages", internal.HandleMessages)

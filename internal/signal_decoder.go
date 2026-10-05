@@ -759,3 +759,119 @@ func DecodeSignalBackup(
 
 	return smsCount, mmsCount, nil
 }
+
+// ExtractSignalSelfPhone quickly inspects the first few frames of a Signal backup to determine the account owner's phone number and profile name
+func ExtractSignalSelfPhone(backupPath, passphrase string) (phone string, name string, err error) {
+	f, err := os.Open(backupPath)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+
+	var iv [16]byte
+	if _, err := io.ReadFull(f, iv[:]); err != nil {
+		return "", "", fmt.Errorf("failed to read IV: %w", err)
+	}
+
+	var salt [32]byte
+	if _, err := io.ReadFull(f, salt[:]); err != nil {
+		return "", "", fmt.Errorf("failed to read salt: %w", err)
+	}
+
+	key := signalBackupKey(passphrase, salt[:])
+	derived := signalDeriveSecrets(key, []byte("Backup Export"))
+	aesKey := derived[:32]
+	macKey := derived[32:]
+
+	aesBlock, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create AES cipher: %w", err)
+	}
+
+	currentIV := make([]byte, 16)
+	copy(currentIV, iv[:])
+	counter := signalBytesToUint32(iv[:])
+
+	tempDir, err := os.MkdirTemp("", "sbv_sig_self_*")
+	if err != nil {
+		return "", "", err
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "temp.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return "", "", err
+	}
+	defer db.Close()
+
+	macHasher := hmac.New(crypto.SHA256.New, macKey)
+	tx, err := db.Begin()
+	if err != nil {
+		return "", "", err
+	}
+
+	totalFrames := 0
+	for totalFrames < 2000 {
+		var frameLen uint32
+		err := binary.Read(f, binary.BigEndian, &frameLen)
+		if err != nil {
+			break
+		}
+		frame := make([]byte, frameLen)
+		if _, err := io.ReadFull(f, frame); err != nil {
+			break
+		}
+		if len(frame) < 10 {
+			break
+		}
+		theirMac := frame[len(frame)-10:]
+		ciphertext := frame[:len(frame)-10]
+		macHasher.Reset()
+		macHasher.Write(ciphertext)
+		ourMac := macHasher.Sum(nil)[:10]
+		if !hmac.Equal(theirMac, ourMac) {
+			_ = tx.Rollback()
+			return "", "", fmt.Errorf("incorrect Signal backup passphrase")
+		}
+
+		signalUint32ToBytes(currentIV, counter)
+		counter++
+		stream := cipher.NewCTR(aesBlock, currentIV)
+		plaintext := make([]byte, len(ciphertext))
+		stream.XORKeyStream(plaintext, ciphertext)
+		totalFrames++
+
+		stmtSQL, stmtParams, _, attLen, isEnd := parseSignalRawBackupFrame(plaintext)
+		if stmtSQL != "" {
+			_, _ = tx.Exec(stmtSQL, stmtParams...)
+		}
+		if attLen > 0 {
+			signalUint32ToBytes(currentIV, counter)
+			counter++
+			_, _ = f.Seek(int64(attLen+10), io.SeekCurrent)
+		}
+		if isEnd {
+			break
+		}
+
+		// Check if recipient 1 is already available every 50 frames
+		if totalFrames%50 == 0 {
+			_ = tx.Commit()
+			var p, n sql.NullString
+			rowErr := db.QueryRow("SELECT phone, signal_profile_name FROM recipient WHERE _id = 1").Scan(&p, &n)
+			if rowErr == nil && p.String != "" {
+				return p.String, n.String, nil
+			}
+			tx, _ = db.Begin()
+		}
+	}
+	_ = tx.Commit()
+
+	var p, n sql.NullString
+	if err := db.QueryRow("SELECT phone, signal_profile_name FROM recipient WHERE _id = 1").Scan(&p, &n); err == nil {
+		return p.String, n.String, nil
+	}
+
+	return "", "", fmt.Errorf("recipient #1 not found in Signal backup")
+}
