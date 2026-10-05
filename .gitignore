@@ -5,6 +5,8 @@
 SBV-Windows-Portable/
 media/
 data/
+test-data/
+**/test-data/
 
 # Backend databases & temporary files
 tmp/

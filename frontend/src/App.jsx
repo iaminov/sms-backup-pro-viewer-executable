@@ -279,7 +279,6 @@ function App() {
                   </svg>
                   Settings
                 </Dropdown.Item>
-
               </Dropdown.Menu>
             </Dropdown>
           </div>
@@ -382,20 +381,29 @@ function App() {
                   </svg>
                   <input
                     type="text"
-                    id="conversationFilter"
-                    name="conversationFilter"
-                    className="form-control form-control-sm ps-4"
-                    placeholder="Search..."
-                    aria-label="Filter conversations"
+                    className="form-control form-control-sm"
+                    style={{paddingLeft: '1.75rem'}}
+                    placeholder="Filter conversations..."
                     value={searchFilter}
                     onChange={(e) => setSearchFilter(e.target.value)}
                   />
+                  {searchFilter && (
+                    <button
+                      className="btn btn-sm btn-link position-absolute p-0 text-muted"
+                      style={{right: '0.5rem', top: '50%', transform: 'translateY(-50%)'}}
+                      onClick={() => setSearchFilter('')}
+                    >
+                      <svg style={{width: '0.875rem', height: '0.875rem'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               </div>
-              <div className="overflow-auto" style={{height: 'calc(100% - 4.5rem)'}}>
+              <div className="overflow-y-auto" style={{height: 'calc(100% - 73px)'}}>
                 <ConversationList
                   conversations={filteredConversations}
-                  selectedConversation={selectedConversation}
+                  selectedAddress={selectedConversation?.address}
                   onSelectConversation={handleSelectConversation}
                   loading={conversationsLoading}
                 />
@@ -460,6 +468,17 @@ function App() {
         <Upload
           onClose={() => setShowUpload(false)}
           onSuccess={handleUploadSuccess}
+          onOpenExtractMedia={() => {
+            setShowUpload(false);
+            setShowExtractMedia(true);
+          }}
+        />
+      )}
+
+      {/* Extract Media Modal */}
+      {showExtractMedia && (
+        <ExtractMediaModal
+          onClose={() => setShowExtractMedia(false)}
         />
       )}
 
@@ -468,9 +487,8 @@ function App() {
         show={showSettingsModal}
         onClose={() => setShowSettingsModal(false)}
         onSettingsUpdated={(newSettings) => {
-          setSettings(newSettings)
-          // Reload conversations if show_calls setting changed
-          fetchConversations()
+          setSettings(newSettings);
+          fetchConversations();
         }}
       />
 
@@ -480,19 +498,8 @@ function App() {
           onClose={() => setShowPasswordModal(false)}
         />
       )}
-
-      {/* Settings Modal */}
-      <SettingsModal
-        show={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        onSettingsUpdated={(newSettings) => {
-          setSettings(newSettings)
-          // Reload conversations if show_calls setting changed
-          fetchConversations()
-        }}
-      />
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
