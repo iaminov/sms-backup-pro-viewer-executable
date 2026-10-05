@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"archive/zip"
 	"context"
 	"database/sql"
 	"fmt"
@@ -168,6 +169,9 @@ func (s *AutoImportService) processFile(userID, filePath, filename string) {
 	if strings.HasSuffix(strings.ToLower(filename), ".xml") {
 		logWriter.log("Detected XML backup file")
 		parseErr = s.parseXMLBackup(userDB, filePath, logWriter)
+	} else if strings.HasSuffix(strings.ToLower(filename), ".zip") {
+		logWriter.log("Detected ZIP backup file")
+		parseErr = s.parseZipBackup(userDB, filePath, logWriter)
 	} else {
 		logWriter.log("ERROR: Unsupported file type")
 		slog.Warn("Unsupported file type", "userID", userID, "file", filename)
@@ -291,4 +295,44 @@ func (l *importLogger) log(format string, args ...interface{}) {
 	l.file.Sync() // Ensure it's written to disk
 
 	slog.Info("Auto-import", "userID", l.userID, "file", l.filename, "message", message)
+}
+
+// parseZipBackup parses all XML backups inside a ZIP archive
+func (s *AutoImportService) parseZipBackup(userDB *sql.DB, filePath string, logger *importLogger) error {
+	logger.log("Parsing ZIP backup file")
+
+	zReader, err := zip.OpenReader(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open zip file: %w", err)
+	}
+	defer zReader.Close()
+
+	foundXML := false
+	var totalMessages, totalCalls int
+	for _, zFile := range zReader.File {
+		if strings.HasSuffix(strings.ToLower(zFile.Name), ".xml") {
+			foundXML = true
+			logger.log("Processing XML inside zip: %s", zFile.Name)
+			rc, err := zFile.Open()
+			if err != nil {
+				logger.log("ERROR: Failed to open %s: %v", zFile.Name, err)
+				return fmt.Errorf("failed to open %s from zip: %w", zFile.Name, err)
+			}
+			mCount, cCount, err := ParseSMSBackupStreaming(userDB, rc, 100)
+			rc.Close()
+			if err != nil {
+				logger.log("ERROR: Failed to parse %s inside zip: %v", zFile.Name, err)
+				return fmt.Errorf("failed to parse %s inside zip: %w", zFile.Name, err)
+			}
+			totalMessages += mCount
+			totalCalls += cCount
+		}
+	}
+
+	if !foundXML {
+		return fmt.Errorf("no .xml file found inside ZIP archive")
+	}
+
+	logger.log("Successfully imported %d messages and %d calls from zip archive", totalMessages, totalCalls)
+	return nil
 }

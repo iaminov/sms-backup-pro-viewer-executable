@@ -2,7 +2,11 @@ package internal
 
 
 import (
+	"archive/zip"
+	"encoding/base64"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -260,5 +264,194 @@ func TestInvalidXML(t *testing.T) {
 		}
 		// Date "notanumber" should result in Unix epoch
 		t.Logf("Invalid date parsed as: %v", msg.Date)
+	}
+}
+
+func TestLoadMediaToggle_ParseSMSBackup(t *testing.T) {
+	fakeData := []byte("fake-jpeg-photo-data")
+	b64Img := base64.StdEncoding.EncodeToString(fakeData)
+
+	mmsXML := fmt.Sprintf(`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<smses count="1">
+  <mms date="1672531199000" address="+15551234567" contact_name="Alice" ct_t="application/vnd.wap.mms-message">
+    <parts>
+      <part ct="text/plain" text="Hello with photo" />
+      <part ct="image/jpeg" name="pic.jpg" data="%s" />
+    </parts>
+  </mms>
+</smses>`, b64Img)
+
+	// 1. Default (no arg) -> media loaded
+	{
+		res, err := ParseSMSBackup(strings.NewReader(mmsXML))
+		if err != nil {
+			t.Fatalf("ParseSMSBackup failed: %v", err)
+		}
+		if len(res.Messages) != 1 {
+			t.Fatalf("Expected 1 message, got %d", len(res.Messages))
+		}
+		msg := res.Messages[0]
+		if len(msg.MediaData) == 0 {
+			t.Errorf("Expected MediaData to be populated by default")
+		}
+		if msg.MediaType != "image/jpeg" {
+			t.Errorf("Expected MediaType 'image/jpeg', got '%s'", msg.MediaType)
+		}
+		if msg.Body != "Hello with photo" {
+			t.Errorf("Expected body 'Hello with photo', got '%s'", msg.Body)
+		}
+	}
+
+	// 2. Explicit true -> media loaded
+	{
+		res, err := ParseSMSBackup(strings.NewReader(mmsXML), true)
+		if err != nil {
+			t.Fatalf("ParseSMSBackup(true) failed: %v", err)
+		}
+		msg := res.Messages[0]
+		if len(msg.MediaData) == 0 {
+			t.Errorf("Expected MediaData to be populated when loadMedia=true")
+		}
+	}
+
+	// 3. Explicit false -> media NOT loaded, but message body and metadata preserved
+	{
+		res, err := ParseSMSBackup(strings.NewReader(mmsXML), false)
+		if err != nil {
+			t.Fatalf("ParseSMSBackup(false) failed: %v", err)
+		}
+		if len(res.Messages) != 1 {
+			t.Fatalf("Expected 1 message, got %d", len(res.Messages))
+		}
+		msg := res.Messages[0]
+		if len(msg.MediaData) != 0 {
+			t.Errorf("Expected MediaData to be empty when loadMedia=false, got %d bytes", len(msg.MediaData))
+		}
+		if msg.MediaType != "" {
+			t.Errorf("Expected empty MediaType when loadMedia=false, got '%s'", msg.MediaType)
+		}
+		if msg.Body != "Hello with photo" {
+			t.Errorf("Expected body to be preserved as 'Hello with photo', got '%s'", msg.Body)
+		}
+		if msg.Address != "+15551234567" {
+			t.Errorf("Expected address '+15551234567', got '%s'", msg.Address)
+		}
+	}
+}
+
+func TestProcessUploadedFile_XML_And_Zip(t *testing.T) {
+	fakeData := []byte("binary-mms-image-bytes")
+	b64Img := base64.StdEncoding.EncodeToString(fakeData)
+
+	mmsXML := fmt.Sprintf(`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<smses count="1">
+  <sms protocol="0" address="+15551112222" date="1672531000000" type="1" body="SMS text message" read="1" status="-1" />
+  <mms date="1672531199000" address="+15553334444" contact_name="Charlie" ct_t="application/vnd.wap.mms-message">
+    <parts>
+      <part ct="text/plain" text="MMS text note" />
+      <part ct="image/jpeg" name="pic.jpg" data="%s" />
+    </parts>
+  </mms>
+</smses>`, b64Img)
+
+	tmpDir, err := os.MkdirTemp("", "test_proc_upload_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Setup user DB
+	testUID := fmt.Sprintf("test_user_%d", time.Now().UnixNano())
+	userDBPath := filepath.Join(tmpDir, fmt.Sprintf("sbv_%s.db", testUID))
+	if err := InitUserDB(testUID, userDBPath); err != nil {
+		t.Fatalf("Failed to init user db: %v", err)
+	}
+	userDB, err := GetUserDB(testUID, "testuser")
+	if err != nil {
+		t.Fatalf("Failed to get user db: %v", err)
+	}
+	defer func() {
+		userDB.Close()
+		userDBsMutex.Lock()
+		delete(userDBs, testUID)
+		userDBsMutex.Unlock()
+	}()
+
+	// 1. Test streaming XML with loadMedia = false
+	{
+		mCount, _, err := ParseSMSBackupStreaming(userDB, strings.NewReader(mmsXML), 10, false)
+		if err != nil {
+			t.Fatalf("ParseSMSBackupStreaming(false) failed: %v", err)
+		}
+		if mCount != 2 {
+			t.Errorf("Expected 2 messages parsed, got %d", mCount)
+		}
+
+		// Check that media_data was NOT saved
+		var mediaCount int
+		err = userDB.QueryRow("SELECT COUNT(*) FROM messages WHERE media_data IS NOT NULL").Scan(&mediaCount)
+		if err != nil {
+			t.Fatalf("Failed to query messages: %v", err)
+		}
+		if mediaCount != 0 {
+			t.Errorf("Expected 0 messages with media_data when loadMedia=false, got %d", mediaCount)
+		}
+	}
+
+	// 2. Test streaming ZIP archive with loadMedia = true
+	{
+		// Create a zip in memory / on disk
+		zipPath := filepath.Join(tmpDir, "backup.zip")
+		zf, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatalf("Failed to create zip: %v", err)
+		}
+		zw := zip.NewWriter(zf)
+		w, err := zw.Create("sms_backup.xml")
+		if err != nil {
+			t.Fatalf("Failed to create zip entry: %v", err)
+		}
+		_, _ = w.Write([]byte(mmsXML))
+		zw.Close()
+		zf.Close()
+
+		// Verify isZipFile detects it
+		if !isZipFile(zipPath) {
+			t.Errorf("Expected isZipFile to return true for %s", zipPath)
+		}
+
+		// Clear DB before test 2 so duplicate conflict does not skip re-insertion
+		userDB.Exec("DELETE FROM messages")
+		userDB.Exec("DELETE FROM conversations")
+
+		// Open ZIP and stream through ParseSMSBackupStreaming with loadMedia=true
+		zr, err := zip.OpenReader(zipPath)
+		if err != nil {
+			t.Fatalf("Failed to open zip reader: %v", err)
+		}
+		rc, err := zr.File[0].Open()
+		if err != nil {
+			t.Fatalf("Failed to open file in zip: %v", err)
+		}
+		mCount, _, err := ParseSMSBackupStreaming(userDB, rc, 10, true)
+		rc.Close()
+		zr.Close()
+
+		if err != nil {
+			t.Fatalf("Streaming from zip failed: %v", err)
+		}
+		if mCount != 2 {
+			t.Errorf("Expected 2 messages from zip, got %d", mCount)
+		}
+
+		// Now verify media_data IS saved for the newly streamed MMS
+		var mediaCount int
+		err = userDB.QueryRow("SELECT COUNT(*) FROM messages WHERE media_data IS NOT NULL").Scan(&mediaCount)
+		if err != nil {
+			t.Fatalf("Failed to query messages: %v", err)
+		}
+		if mediaCount < 1 {
+			t.Errorf("Expected at least 1 message with media_data when loadMedia=true, got %d", mediaCount)
+		}
 	}
 }

@@ -94,12 +94,12 @@ function ExtractMediaModal({ onClose }) {
 
     if (sourceType === 'local') {
       if (!filePath.trim()) {
-        setError('Please select or enter the path to your SMS Backup XML file.')
+        setError('Please select or enter the path to your SMS Backup XML or ZIP file.')
         return
       }
     } else {
       if (!selectedFile) {
-        setError('Please select an XML backup file to extract.')
+        setError('Please select an XML or ZIP backup file to extract.')
         return
       }
     }
@@ -178,12 +178,12 @@ function ExtractMediaModal({ onClose }) {
           <svg style={{ width: '1.4rem', height: '1.4rem' }} className="text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
-          Extract Media Files from XML
+          Extract Media Files from XML / ZIP
         </Modal.Title>
       </Modal.Header>
       <Modal.Body>
         <p className="text-muted small mb-3">
-          Extract and decode all photos, videos, and audio attachments embedded inside your SMS/MMS XML backup file into organized folders on your computer.
+          Extract and decode all photos, videos, and audio attachments embedded inside your SMS/MMS XML or ZIP (.xml, .zip) backup file into organized folders on your computer.
         </p>
 
         {error && (
@@ -253,13 +253,13 @@ function ExtractMediaModal({ onClose }) {
             onSelect={(k) => setSourceType(k)}
             className="mb-3"
           >
-            <Tab eventKey="local" title="Local XML File (Recommended - Fastest)">
+            <Tab eventKey="local" title="Local XML or ZIP File (Recommended - Fastest)">
               <Form.Group className="mb-3">
-                <Form.Label className="fw-semibold small">Select SMS Backup XML File</Form.Label>
+                <Form.Label className="fw-semibold small">Select SMS Backup File (.xml or .zip)</Form.Label>
                 <InputGroup>
                   <Form.Control
                     type="text"
-                    placeholder="Click Browse or enter path to XML file..."
+                    placeholder="Click Browse or enter path to XML or ZIP file..."
                     value={filePath}
                     onChange={(e) => setFilePath(e.target.value)}
                     disabled={extracting}
@@ -271,7 +271,7 @@ function ExtractMediaModal({ onClose }) {
                     className="d-flex align-items-center gap-1"
                   >
                     <span>📄</span>
-                    {browsingFile ? 'Opening...' : 'Browse XML File...'}
+                    {browsingFile ? 'Opening...' : 'Browse File (.xml, .zip)...'}
                   </Button>
                 </InputGroup>
                 <Form.Text className="text-muted">
@@ -279,17 +279,17 @@ function ExtractMediaModal({ onClose }) {
                 </Form.Text>
               </Form.Group>
             </Tab>
-            <Tab eventKey="upload" title="Upload XML from Browser">
+            <Tab eventKey="upload" title="Upload XML or ZIP from Browser">
               <Form.Group className="mb-3">
-                <Form.Label className="fw-semibold small">Choose XML Backup</Form.Label>
+                <Form.Label className="fw-semibold small">Choose XML or ZIP Backup</Form.Label>
                 <Form.Control
                   type="file"
-                  accept=".xml"
+                  accept=".xml,.zip"
                   onChange={(e) => setSelectedFile(e.target.files[0] || null)}
                   disabled={extracting}
                 />
                 <Form.Text className="text-muted">
-                  Select an XML backup from your computer.
+                  Select an XML or ZIP (.zip, .xml.zip) backup from your computer.
                 </Form.Text>
               </Form.Group>
             </Tab>

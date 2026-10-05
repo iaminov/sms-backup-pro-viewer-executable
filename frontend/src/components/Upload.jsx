@@ -6,6 +6,7 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
 function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
   const [files, setFiles] = useState([])
+  const [loadMedia, setLoadMedia] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState(null)
   const [success, setSuccess] = useState(null)
@@ -54,21 +55,24 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
     if (uploading) return
 
     const droppedFiles = Array.from(e.dataTransfer.files)
-    // Filter to only accept XML files
-    const xmlFiles = droppedFiles.filter(file => file.name.toLowerCase().endsWith('.xml'))
+    // Filter to accept XML and ZIP (.xml, .zip, .xml.zip) files
+    const validFiles = droppedFiles.filter(file => {
+      const name = file.name.toLowerCase()
+      return name.endsWith('.xml') || name.endsWith('.zip')
+    })
 
-    if (xmlFiles.length === 0) {
-      setError('Please drop only XML files')
+    if (validFiles.length === 0) {
+      setError('Please drop XML or ZIP (.zip, .xml.zip) backup files')
       return
     }
 
-    if (xmlFiles.length < droppedFiles.length) {
-      setError(`Only ${xmlFiles.length} of ${droppedFiles.length} files are XML files. Non-XML files were ignored.`)
+    if (validFiles.length < droppedFiles.length) {
+      setError(`Only ${validFiles.length} of ${droppedFiles.length} files are XML/ZIP files. Unsupported files were ignored.`)
     }
 
-    setFiles(xmlFiles)
+    setFiles(validFiles)
     setSuccess(null)
-    if (xmlFiles.length === droppedFiles.length) {
+    if (validFiles.length === droppedFiles.length) {
       setError(null)
     }
   }
@@ -123,10 +127,12 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
 
     const uploadPromise = new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('POST', `${API_BASE}/upload`)
+      const uploadUrl = `${API_BASE}/upload?load_media=${loadMedia ? 'true' : 'false'}`
+      xhr.open('POST', uploadUrl)
       xhr.withCredentials = true
       xhr.setRequestHeader('Content-Type', 'application/octet-stream')
       xhr.setRequestHeader('X-Filename', file.name)
+      xhr.setRequestHeader('X-Load-Media', loadMedia ? 'true' : 'false')
 
       let lastReported = 0
       xhr.upload.onprogress = (event) => {
@@ -246,7 +252,7 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
             <svg style={{width: '1.25rem', height: '1.25rem'}} className="text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <small>Select or drag and drop one or more XML files from SMS Backup & Restore app</small>
+            <small>Select or drag and drop one or more XML or ZIP (.xml, .zip) files from SMS Backup & Restore app</small>
           </div>
 
           <Form.Group>
@@ -279,10 +285,10 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
               </div>
               <div className={isDragging ? "text-primary fw-semibold" : "text-muted"}>
                 {isDragging ? (
-                  <div>Drop XML files here</div>
+                  <div>Drop XML / ZIP backup files here</div>
                 ) : (
                   <div>
-                    <div className="mb-2">Drag and drop XML files here</div>
+                    <div className="mb-2">Drag and drop XML or ZIP files here</div>
                     <div className="text-muted small">or</div>
                   </div>
                 )}
@@ -292,8 +298,8 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
                   type="file"
                   id="backupFileInput"
                   name="backupFileInput"
-                  aria-label="Select backup XML files"
-                  accept=".xml"
+                  aria-label="Select backup XML or ZIP files"
+                  accept=".xml,.zip"
                   onChange={handleFileChange}
                   disabled={uploading}
                   multiple
@@ -318,6 +324,23 @@ function Upload({ onClose, onSuccess, onOpenExtractMedia }) {
                   Extract Media
                 </Button>
               )}
+            </div>
+
+            <div className="mt-3 p-3 bg-body-tertiary border rounded">
+              <Form.Check
+                type="switch"
+                id="load-media-switch"
+                label="Load media attachments (photos, videos, audio)"
+                checked={loadMedia}
+                onChange={(e) => setLoadMedia(e.target.checked)}
+                disabled={uploading}
+                className="fw-semibold"
+              />
+              <div className="text-muted small ps-4 mt-1">
+                {loadMedia
+                  ? "Media files will be decoded and viewable inside conversation threads."
+                  : "Skips importing media attachments. Messages and calls will still import completely, saving substantial memory and loading much faster."}
+              </div>
             </div>
 
             {files.length > 0 && !uploading && (

@@ -10,6 +10,14 @@ This project integrates the interactive web interface and SQLite indexing of **[
 
 - **100% Offline & Private**: Runs strictly locally on `127.0.0.1`. Your messages and media never leave your machine.
 - **Zero Login / Passwordless**: Streamlined for desktop use—no accounts, usernames, or passwords required. Opens directly into your conversations.
+- **Universal XML & ZIP Support Across All Features**:
+  - Every feature—Conversation Viewer, Media Extractor, Auto-Import, and Backup Merger—seamlessly accepts both raw `.xml` files and compressed `.zip` (`.xml.zip`) archives directly, without requiring manual decompression beforehand.
+- **Interactive Conversation Viewer with Media Loading Toggle**:
+  - **Load Media Toggle**: Switch between loading media attachments or importing text-only. When disabled, skips heavy base64 media decoding to drastically accelerate import speed and save disk space, while keeping all messages, calls, and contact threads 100% intact.
+  - Full-text search with SQLite FTS5.
+  - Chronological conversation threads and group MMS support.
+  - Call logs and call duration analytics.
+  - Date range filtering and printable conversation view.
 - **Multi-Format Backup Merger (SMS Backup & Restore XML/ZIP & Signal Backups)**:
   - **Recursive Multi-Format Discovery**: Select any root folder, and SBV automatically scans all folders and subfolders for extracted (`.xml`), compressed (`.zip`), and encrypted Signal (`.backup`) files.
   - **Encrypted Signal Android Backup Support**: Decrypts Signal `.backup` archives on the fly using your 30-digit passphrase via AES-256-CTR, HMAC-SHA256, and 250,000-round PBKDF2/HKDF key derivation. Automatically reconstructs Signal SMS, group MMS chats, sender/recipient identities, and media attachments into standard SMS Backup & Restore XML records.
@@ -18,8 +26,8 @@ This project integrates the interactive web interface and SQLite indexing of **[
   - **Schema Normalization**: Automatically samples the newest backup file in your collection and normalizes legacy XML schemas into a single unified format.
   - **Media Stripping Toggle**: Choose whether to keep embedded base64 media or strip it to create an ultra-fast, lightweight text-only XML backup.
   - **Constant Low-Memory Footprint**: Uses a disk-backed SQLite staging pipeline with indexed MD5 dedup keys—effortlessly merges 25+ GB backup libraries with constant RAM usage (< 50 MB).
-- **Full Media Extractor**:
-  - Automatically identifies and decodes all base64-encoded media attachments from MMS messages in your backup XML.
+- **Full Media Extractor (from XML & ZIP Archives)**:
+  - Automatically identifies and decodes all base64-encoded media attachments from MMS messages in `.xml` or `.zip` backup archives.
   - Organizes files into clean, dedicated subdirectories:
     - 📁 `media/image/` &mdash; Photos (`.jpg`, `.png`, `.gif`, `.heic`, `.webp`, `.bmp`)
     - 📁 `media/video/` &mdash; Videos (`.mp4`, `.3gp`, `.3g2`, `.mov`, `.mkv`, `.webm`)
@@ -27,13 +35,8 @@ This project integrates the interactive web interface and SQLite indexing of **[
     - 📁 `media/other/` &mdash; Contact vCards (`.vcf`) and miscellaneous attachments
   - **Conversation Subfolders**: Optional toggle to group extracted media by contact or conversation name.
   - **Timestamp Preservation**: Sets the filesystem modification timestamp (`os.Chtimes`) to match the exact message date and time.
-  - **Direct Local Disk Access**: Point the extractor to an XML file path on your drive for instant processing with native Windows file and folder pickers.
+  - **Direct Local Disk Access**: Point the extractor to an XML or ZIP file path on your drive for instant processing with native Windows file and folder pickers.
 - **Native HEIC / HEIF MMS Decoding**: Uses native `libheif` CGO bindings (`lowcarbdev/libheif-go` and MSYS2 UCRT64 `libheif`) to render Apple HEIC photos in your browser, with an option to export `.jpg` files during media extraction.
-- **Comprehensive Viewer**:
-  - Full-text search with SQLite FTS5.
-  - Chronological conversation threads and group MMS support.
-  - Call logs and call duration analytics.
-  - Date range filtering and printable conversation view.
 
 ---
 
@@ -49,7 +52,25 @@ This project integrates the interactive web interface and SQLite indexing of **[
 
 ## How to Use
 
-### 1. Merging XML, ZIP & Signal Backups
+### 1. Viewing Conversations
+- In the top navigation bar, click **Upload Backup**.
+- Drag and drop or select one or more `.xml` or `.zip` (`.xml.zip`) backup files.
+- **Load Media Toggle**: Toggle whether to load photos, videos, and audio attachments into conversation threads, or keep it off for a lightning-fast, lightweight text-only import.
+- Click **Upload** and wait for processing to complete.
+- Browse conversation threads, search messages, view call records, and filter by date.
+
+### 2. Extracting Media Attachments to Folders
+- Click the **Extract Media** button in the top navigation bar.
+- Select your source:
+  - **Local XML or ZIP File**: Click **Browse File (.xml, .zip)...** to select your backup directly using the native Windows file picker.
+  - **Upload XML or ZIP**: Or select/drag-and-drop a file through the browser.
+- Click **Browse Folder** to choose your extraction target directory.
+- Check **Create separate subfolders for each conversation** if you want individual contact folders.
+- Choose which media types to extract (Images, Videos, Audio, and optional HEIC to JPEG conversion).
+- Click **Start Extraction**. A live percentage bar and counter will track progress.
+- When finished, click **Open Media Folder in Windows Explorer** to access your categorized media.
+
+### 3. Merging XML, ZIP & Signal Backups
 - Click the **Merge Backups** button in the top navigation bar.
 - Click **Browse Folder** to pick the directory containing your `.xml`, `.zip`, and/or `.backup` archives (SBV recursively traverses all subfolders).
 - **Signal Backup Passphrase**: If you have encrypted Signal `.backup` files in the folder, enter your 30-digit passphrase (e.g. `31889 30544 62782 17192 51469 48815`). The app will decrypt and convert Signal chats directly into the standard SMS/MMS structure.
@@ -59,21 +80,6 @@ This project integrates the interactive web interface and SQLite indexing of **[
   - **Normalize Schema**: Checked by default. Adapts older backup schemas to match the latest Android schema format.
 - Click **Start Merge & Deduplication**. Watch real-time progress as backups are parsed, duplicates removed, and sorted.
 - Once finished, click **Show Merged File in Windows Explorer**.
-
-### 2. Extracting Media Attachments to Folders
-- Click the **Extract Media** button in the top navigation bar.
-- Select your source:
-  - **Local XML File**: Click **Browse File** to select your backup XML directly using the native Windows file picker.
-  - **Upload XML File**: Or select/drag-and-drop a file through the browser.
-- Click **Browse Folder** to choose your extraction target directory.
-- Check **Group by Conversation** if you want individual contact folders.
-- Choose which media types to extract (Images, Videos, Audio, and optional HEIC to JPEG conversion).
-- Click **Start Extraction**. A live percentage bar and counter will track progress.
-- When finished, click **Open Media Folder in Windows Explorer** to access your categorized media.
-
-### 3. Viewing Conversations
-- In the top navigation bar, click **Upload** to load your `sms-*.xml` or `calls-*.xml` backup file into the interactive viewer.
-- Browse conversation threads, filter by date, view call records, or search messages using full-text search.
 
 ---
 
@@ -107,76 +113,3 @@ The script will automatically:
 4. Compile `sbv.exe` with CGO build tags `fts5 heic`.
 5. Recursively discover and bundle all required native Windows DLLs alongside `sbv.exe`.
 6. Package the final standalone distribution into `SBV-Windows-Portable` and `SBV-Windows-Portable.zip`.
-
----
-
-## Architecture & Integration
-
-```
-                         SMS Backup & Restore Files
-                          (.xml and .zip archives)
-                                    │
-                                    ▼
-       ┌────────────────────────────────────────────────────────┐
-       │             Recursive Archive & XML Scanner            │
-       │         (In-Memory ZIP Streaming & File Ordering)      │
-       └────────────────────────────┬───────────────────────────┘
-                                    │
-       ┌────────────────────────────┼───────────────────────────┐
-       ▼                            ▼                           ▼
-[Database Ingestion]      [Backup Merger Engine]       [Media Extraction]
-(Adapted from sbv)        (Stream Deduplication)      (Adapted from sbrparser)
-       │                            │                           │
-       ├─ SQLite WAL + FTS5         ├─ MD5 Dedup Key Index      ├─ MIME Classifier
-       ├─ Local Passwordless        ├─ SQLite Staging Table     ├─ Base64 Streamer
-       └─ Echo HTTP Server          ├─ Schema Normalizer        ├─ Timestamp Restore
-              │                     ├─ Media Stripping Toggle   └─ Categorized Folders
-              │                     └─ Chronological XML Stream          │
-              │                             │                            ▼
-              ▼                             ▼                  Windows File Explorer
-       ┌─────────────────────────────────────────┐
-       │             React Frontend              │
-       │        (Vite + React Router SPA)        │
-       └────────────────────┬────────────────────┘
-                            │
-                      Local Browser
-                  (http://127.0.0.1:8085)
-```
-
----
-
-## Citations & Acknowledgments
-
-This project is an integration and enhancement of the following open-source projects:
-
-### 1. SMS Backup Viewer (`lowcarbdev/sbv`)
-- **Author**: [lowcarbdev](https://github.com/lowcarbdev)
-- **Repository**: [https://github.com/lowcarbdev/sbv](https://github.com/lowcarbdev/sbv)
-- **License**: [MIT License](https://github.com/lowcarbdev/sbv/blob/main/LICENSE)
-- **Contributions Used**:
-  - Core Echo web server architecture and SQLite indexing schema.
-  - React single-page frontend (conversation thread viewer, date range filters, call logs, search).
-  - Streaming XML reader foundation and `libheif-go` integration.
-
-### 2. SMS Backup & Restore Parser (`danzek/sms-backup-and-restore-parser`)
-- **Author**: Dan O'Day ([@danzek](https://github.com/danzek) / <d@4n68r.com>)
-- **Repository**: [https://github.com/danzek/sms-backup-and-restore-parser](https://github.com/danzek/sms-backup-and-restore-parser)
-- **License**: [MIT License](https://github.com/danzek/sms-backup-and-restore-parser/blob/master/LICENSE)
-- **Contributions Used**:
-  - MMS attachment extraction design, MIME content-type mapping, and media category identification.
-  - Safe filename generation and collision-handling algorithms.
-  - Phone number normalization and suffix cleanup routines.
-
-### 3. libheif
-- **Maintainer**: [struktur AG](https://github.com/strukturag)
-- **Repository**: [https://github.com/strukturag/libheif](https://github.com/strukturag/libheif)
-- **License**: [LGPL-3.0-or-later](https://github.com/strukturag/libheif/blob/master/COPYING)
-- **Contributions Used**:
-  - Native HEIC / HEIF image codec libraries bundled as UCRT64 dynamic link libraries (`libheif.dll` and dependent codec DLLs).
-
----
-
-## License
-
-This project is released under the **[MIT License](LICENSE)**.
-All third-party libraries and runtime dependencies retain their respective licenses (see [LICENSE](LICENSE) for details).

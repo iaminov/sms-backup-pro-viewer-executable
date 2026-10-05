@@ -88,9 +88,15 @@ func setupTestDB(t *testing.T) (string, func()) {
 	cleanup := func() {
 		if db != nil {
 			db.Close()
+			db = nil
 		}
 		if userDB != nil {
 			userDB.Close()
+			userDB = nil
+		}
+		if authDB != nil {
+			authDB.Close()
+			authDB = nil
 		}
 		os.Remove(tmpDB)
 		os.Remove(tmpAuthDB)

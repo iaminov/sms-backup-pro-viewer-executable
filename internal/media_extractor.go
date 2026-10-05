@@ -1,6 +1,7 @@
 ﻿package internal
 
 import (
+	"archive/zip"
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
@@ -506,6 +507,261 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions, totalSiz
 	return GetMediaExtractProgress(), nil
 }
 
+// ExtractMediaFromFile extracts media from either an XML file or a ZIP archive containing XML files
+func ExtractMediaFromFile(filePath string, opts MediaExtractOptions) (*MediaExtractProgress, error) {
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		updateMediaProgress(func(p *MediaExtractProgress) {
+			p.Status = "error"
+			p.ErrorMessage = err.Error()
+		})
+		return nil, err
+	}
+
+	if isZipFile(filePath) || strings.HasSuffix(strings.ToLower(filePath), ".zip") {
+		return ExtractMediaFromZip(filePath, opts)
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		updateMediaProgress(func(p *MediaExtractProgress) {
+			p.Status = "error"
+			p.ErrorMessage = err.Error()
+		})
+		return nil, err
+	}
+	defer f.Close()
+
+	return ExtractMediaFromXML(f, opts, fi.Size())
+}
+
+// ExtractMediaFromZip extracts media from all XML files inside a ZIP archive
+func ExtractMediaFromZip(zipPath string, opts MediaExtractOptions) (*MediaExtractProgress, error) {
+	outDir := opts.OutputDir
+	if strings.TrimSpace(outDir) == "" {
+		outDir = GetDefaultMediaDir()
+	}
+	absOutDir, err := filepath.Abs(outDir)
+	if err != nil {
+		absOutDir = outDir
+	}
+
+	if !opts.GroupByConversation {
+		for _, d := range []string{"image", "video", "audio", "other"} {
+			if err := os.MkdirAll(filepath.Join(absOutDir, d), 0755); err != nil {
+				updateMediaProgress(func(p *MediaExtractProgress) {
+					p.Status = "error"
+					p.ErrorMessage = fmt.Sprintf("failed to create directory %s: %v", d, err)
+				})
+				return nil, fmt.Errorf("failed to create directory %s: %w", d, err)
+			}
+		}
+	} else {
+		if err := os.MkdirAll(absOutDir, 0755); err != nil {
+			updateMediaProgress(func(p *MediaExtractProgress) {
+				p.Status = "error"
+				p.ErrorMessage = fmt.Sprintf("failed to create output directory %s: %v", absOutDir, err)
+			})
+			return nil, fmt.Errorf("failed to create output directory %s: %w", absOutDir, err)
+		}
+	}
+
+	zReader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		updateMediaProgress(func(p *MediaExtractProgress) {
+			p.Status = "error"
+			p.ErrorMessage = err.Error()
+		})
+		return nil, fmt.Errorf("failed to open zip file: %w", err)
+	}
+	defer zReader.Close()
+
+	var xmlFiles []*zip.File
+	var totalUncompressed int64
+	for _, zFile := range zReader.File {
+		if strings.HasSuffix(strings.ToLower(zFile.Name), ".xml") {
+			xmlFiles = append(xmlFiles, zFile)
+			totalUncompressed += int64(zFile.UncompressedSize64)
+		}
+	}
+
+	if len(xmlFiles) == 0 {
+		err := fmt.Errorf("no .xml files found inside zip archive")
+		updateMediaProgress(func(p *MediaExtractProgress) {
+			p.Status = "error"
+			p.ErrorMessage = err.Error()
+		})
+		return nil, err
+	}
+
+	extractProgressLock.Lock()
+	extractProgress = &MediaExtractProgress{
+		Status:     "extracting",
+		OutputDir:  absOutDir,
+		StartTime:  time.Now(),
+		TotalBytes: totalUncompressed,
+		Percent:    0,
+	}
+	extractProgressLock.Unlock()
+
+	mmsCount := 0
+
+	for _, zFile := range xmlFiles {
+		rc, err := zFile.Open()
+		if err != nil {
+			slog.Error("Failed to open zip entry", "file", zFile.Name, "error", err)
+			continue
+		}
+
+		countingReader := &progressCountingReader{
+			reader:       rc,
+			totalBytes:   totalUncompressed,
+			lastReported: time.Now(),
+		}
+
+		decoder := xml.NewDecoder(countingReader)
+
+		for {
+			token, err := decoder.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				slog.Error("XML decoder error during media extraction from zip", "file", zFile.Name, "error", err)
+				break
+			}
+
+			elem, ok := token.(xml.StartElement)
+			if !ok {
+				continue
+			}
+
+			if elem.Name.Local == "mms" {
+				mmsCount++
+				var mms MMSEntry
+				if err := decoder.DecodeElement(&mms, &elem); err != nil {
+					slog.Error("Failed to decode MMS element from zip", "error", err)
+					continue
+				}
+
+				var dateMs int64
+				if mms.Date != "" {
+					dateMs, _ = strconv.ParseInt(mms.Date, 10, 64)
+				}
+
+				var convDir string
+				if opts.GroupByConversation {
+					convFolderName := getConversationFolderName(mms)
+					convDir = filepath.Join(absOutDir, convFolderName)
+				} else {
+					convDir = absOutDir
+				}
+
+				for partIdx, part := range mms.Parts {
+					if part.Data == "" || isSMILContentType(part.ContentType) {
+						continue
+					}
+
+					subfolder := getSubfolderForContentType(part.ContentType)
+				if subfolder == "image" && !opts.ExtractImg {
+					continue
+				}
+				if subfolder == "video" && !opts.ExtractVid {
+					continue
+				}
+				if subfolder == "audio" && !opts.ExtractAud {
+					continue
+				}
+
+				rawPayload := strings.TrimSpace(part.Data)
+				data, err := base64.StdEncoding.DecodeString(rawPayload)
+				if err != nil {
+					data, err = base64.RawStdEncoding.DecodeString(rawPayload)
+				}
+				if err != nil || len(data) == 0 {
+					continue
+				}
+
+				ext := getExtensionForContentType(part.ContentType)
+				filename := generateMediaFilename(part, dateMs, mmsCount, partIdx+1, ext)
+
+				targetSubDir := filepath.Join(convDir, subfolder)
+				if err := os.MkdirAll(targetSubDir, 0755); err != nil {
+					continue
+				}
+
+				outPath := getUniqueFilePath(targetSubDir, filename)
+				if err := os.WriteFile(outPath, data, 0644); err == nil {
+					if dateMs > 0 {
+						msgTime := time.Unix(dateMs/1000, 0)
+						_ = os.Chtimes(outPath, msgTime, msgTime)
+					}
+
+					updateMediaProgress(func(p *MediaExtractProgress) {
+						switch subfolder {
+						case "image":
+							p.ImagesExtracted++
+						case "video":
+							p.VideosExtracted++
+						case "audio":
+							p.AudioExtracted++
+						default:
+							p.OtherExtracted++
+						}
+						p.ExtractedBytes += int64(len(data))
+					})
+				}
+
+				if opts.ConvertHeic && isHEICContentType(part.ContentType) {
+					jpgData, err := convertHEICtoJPEG(data)
+					if err == nil && len(jpgData) > 0 {
+						jpgName := strings.TrimSuffix(filepath.Base(outPath), filepath.Ext(outPath)) + ".jpg"
+						imgSubDir := filepath.Join(convDir, "image")
+						jpgPath := getUniqueFilePath(imgSubDir, jpgName)
+						if err := os.WriteFile(jpgPath, jpgData, 0644); err == nil {
+							if dateMs > 0 {
+								msgTime := time.Unix(dateMs/1000, 0)
+								_ = os.Chtimes(jpgPath, msgTime, msgTime)
+							}
+						}
+					}
+				}
+
+				data = nil
+			}
+
+			mms.Parts = nil
+			mms = MMSEntry{}
+
+			if mmsCount%25 == 0 {
+				updateMediaProgress(func(p *MediaExtractProgress) {
+					p.ProcessedMMS = mmsCount
+				})
+			}
+		}
+	}
+	rc.Close()
+}
+
+	duration := time.Since(extractProgress.StartTime)
+	updateMediaProgress(func(p *MediaExtractProgress) {
+		p.ProcessedMMS = mmsCount
+		p.Status = "completed"
+		p.Percent = 100
+		p.Duration = duration.Round(time.Millisecond).String()
+	})
+
+	slog.Info("ZIP Media extraction complete",
+		"mmsCount", mmsCount,
+		"images", extractProgress.ImagesExtracted,
+		"videos", extractProgress.VideosExtracted,
+		"audio", extractProgress.AudioExtracted,
+		"duration", duration,
+	)
+
+	return GetMediaExtractProgress(), nil
+}
+
 // HandleExtractMedia starts the media extraction process
 func HandleExtractMedia(c echo.Context) error {
 	var opts MediaExtractOptions
@@ -546,7 +802,11 @@ func HandleExtractMedia(c echo.Context) error {
 			opts.GroupByConversation = group == "true" || group == "1"
 		}
 
-		tempFile, err := os.CreateTemp("", "extract-xml-*.xml")
+		tempPattern := "extract-upload-*.xml"
+		if strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
+			tempPattern = "extract-upload-*.zip"
+		}
+		tempFile, err := os.CreateTemp("", tempPattern)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"success": false,
@@ -560,24 +820,14 @@ func HandleExtractMedia(c echo.Context) error {
 			_ = os.Remove(tempFile.Name())
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"success": false,
-				"error":   "Failed to save uploaded XML: " + err.Error(),
+				"error":   "Failed to save uploaded XML/ZIP: " + err.Error(),
 			})
 		}
 
 		tempPath := tempFile.Name()
-		fileSize := header.Size
 		go func() {
 			defer os.Remove(tempPath)
-			f, err := os.Open(tempPath)
-			if err != nil {
-				updateMediaProgress(func(p *MediaExtractProgress) {
-					p.Status = "error"
-					p.ErrorMessage = err.Error()
-				})
-				return
-			}
-			defer f.Close()
-			_, _ = ExtractMediaFromXML(f, opts, fileSize)
+			_, _ = ExtractMediaFromFile(tempPath, opts)
 		}()
 
 		return c.JSON(http.StatusOK, map[string]interface{}{
@@ -602,7 +852,7 @@ func HandleExtractMedia(c echo.Context) error {
 		})
 	}
 
-	fi, err := os.Stat(opts.FilePath)
+	_, err := os.Stat(opts.FilePath)
 	if os.IsNotExist(err) {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"success": false,
@@ -611,18 +861,8 @@ func HandleExtractMedia(c echo.Context) error {
 	}
 
 	filePath := opts.FilePath
-	fileSize := fi.Size()
 	go func() {
-		f, err := os.Open(filePath)
-		if err != nil {
-			updateMediaProgress(func(p *MediaExtractProgress) {
-				p.Status = "error"
-				p.ErrorMessage = err.Error()
-			})
-			return
-		}
-		defer f.Close()
-		_, _ = ExtractMediaFromXML(f, opts, fileSize)
+		_, _ = ExtractMediaFromFile(filePath, opts)
 	}()
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -723,8 +963,8 @@ func HandleBrowseXMLFile(c echo.Context) error {
 	script := `
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Filter = "SMS Backup XML (*.xml)|*.xml|All Files (*.*)|*.*"
-$dialog.Title = "Select SMS Backup & Restore XML File"
+$dialog.Filter = "SMS Backup Files (*.xml;*.zip)|*.xml;*.zip|XML Files (*.xml)|*.xml|ZIP Archives (*.zip)|*.zip|All Files (*.*)|*.*"
+$dialog.Title = "Select SMS Backup File (XML or ZIP)"
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     Write-Output $dialog.FileName

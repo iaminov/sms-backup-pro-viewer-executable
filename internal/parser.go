@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"archive/zip"
 	"bytes"
 	"database/sql"
 	"encoding/base64"
@@ -99,7 +100,11 @@ type ParseResult struct {
 	Calls    []CallLog
 }
 
-func ParseSMSBackup(r io.Reader) (ParseResult, error) {
+func ParseSMSBackup(r io.Reader, loadMediaOpt ...bool) (ParseResult, error) {
+	loadMedia := true
+	if len(loadMediaOpt) > 0 {
+		loadMedia = loadMediaOpt[0]
+	}
 	var backup SMSBackup
 	decoder := xml.NewDecoder(r)
 	err := decoder.Decode(&backup)
@@ -121,7 +126,7 @@ func ParseSMSBackup(r io.Reader) (ParseResult, error) {
 
 	// Parse MMS messages
 	for _, mms := range backup.MMS {
-		msg, err := convertMMSEntry(mms)
+		msg, err := convertMMSEntry(mms, loadMedia)
 		if err != nil {
 			slog.Error("Error parsing MMS", "error", err)
 			continue
@@ -188,7 +193,11 @@ func convertSMSEntry(sms SMSEntry) (Message, error) {
 	}, nil
 }
 
-func convertMMSEntry(mms MMSEntry) (Message, error) {
+func convertMMSEntry(mms MMSEntry, loadMediaOpt ...bool) (Message, error) {
+	loadMedia := true
+	if len(loadMediaOpt) > 0 {
+		loadMedia = loadMediaOpt[0]
+	}
 	dateMs, err := strconv.ParseInt(mms.Date, 10, 64)
 	if err != nil {
 		return Message{}, err
@@ -305,7 +314,7 @@ func convertMMSEntry(mms MMSEntry) (Message, error) {
 
 		// Check for VCF (vCard) files - these are text/* but should be treated as media attachments
 		if isVCardContentType(part.ContentType) && part.Data != "" {
-			if msg.MediaType == "" { // Only store first media item
+			if loadMedia && msg.MediaType == "" { // Only store first media item
 				data, err := base64.StdEncoding.DecodeString(part.Data)
 				if err == nil {
 					msg.MediaType = part.ContentType
@@ -318,7 +327,7 @@ func convertMMSEntry(mms MMSEntry) (Message, error) {
 		// Check for media - media parts often have text="null" which should be ignored
 		if part.ContentType != "" && part.Data != "" && !isTextContentType(part.ContentType) {
 			// This is media content (image, video, audio, etc.)
-			if msg.MediaType == "" { // Only store first media item
+			if loadMedia && msg.MediaType == "" { // Only store first media item
 				data, err := base64.StdEncoding.DecodeString(part.Data)
 				if err == nil {
 					// Store all media as-is (including HEIC images in original format)
@@ -761,7 +770,11 @@ func SaveUploadedFile(file io.Reader, filename string) (string, error) {
 	}
 
 	// Create temporary file
-	tempFile, err := os.CreateTemp(uploadDir, "backup-*.xml")
+	pattern := "backup-*.xml"
+	if strings.HasSuffix(strings.ToLower(filename), ".zip") {
+		pattern = "backup-*.zip"
+	}
+	tempFile, err := os.CreateTemp(uploadDir, pattern)
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %v", err)
 	}
@@ -806,8 +819,27 @@ func (r *receiveProgressReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ProcessUploadedFile processes the uploaded file in the background
-func ProcessUploadedFile(userID string, username string, filePath string) {
+// isZipFile checks whether a file begins with the ZIP magic bytes
+func isZipFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return false
+	}
+	return magic == [4]byte{'P', 'K', 0x03, 0x04}
+}
+
+// ProcessUploadedFile processes the uploaded file (.xml or .zip) in the background
+func ProcessUploadedFile(userID string, username string, filePath string, loadMediaOpt ...bool) {
+	loadMedia := true
+	if len(loadMediaOpt) > 0 {
+		loadMedia = loadMediaOpt[0]
+	}
+
 	defer func() {
 		// Always clean up the temp file when done
 		slog.Info("Removing temporary file", "path", filePath)
@@ -816,7 +848,7 @@ func ProcessUploadedFile(userID string, username string, filePath string) {
 		}
 	}()
 
-	slog.Info("Starting background processing", "path", filePath, "user", username)
+	slog.Info("Starting background processing", "path", filePath, "user", username, "loadMedia", loadMedia)
 
 	// Get user database
 	userDB, err := GetUserDB(userID, username)
@@ -830,6 +862,69 @@ func ProcessUploadedFile(userID string, username string, filePath string) {
 			uploadProgress.mu.Unlock()
 		}
 		uploadProgressLock.Unlock()
+		return
+	}
+
+	// Check if file is a zip archive
+	if isZipFile(filePath) || strings.HasSuffix(strings.ToLower(filePath), ".zip") {
+		zReader, err := zip.OpenReader(filePath)
+		if err != nil {
+			slog.Error("Error opening zip archive", "error", err)
+			SetUploadProgress(0, 0, "error")
+			uploadProgressLock.Lock()
+			if uploadProgress != nil {
+				uploadProgress.mu.Lock()
+				uploadProgress.ErrorMessage = fmt.Sprintf("Failed to open zip archive: %v", err)
+				uploadProgress.mu.Unlock()
+			}
+			uploadProgressLock.Unlock()
+			return
+		}
+		defer zReader.Close()
+
+		foundXML := false
+		var totalMessages, totalCalls int
+		for _, zFile := range zReader.File {
+			if strings.HasSuffix(strings.ToLower(zFile.Name), ".xml") {
+				foundXML = true
+				rc, err := zFile.Open()
+				if err != nil {
+					slog.Error("Error opening XML from zip", "file", zFile.Name, "error", err)
+					continue
+				}
+				mCount, cCount, err := ParseSMSBackupStreaming(userDB, rc, defaultImportBatchSize, loadMedia)
+				rc.Close()
+				if err != nil {
+					slog.Error("Error processing file inside zip", "file", zFile.Name, "error", err)
+					SetUploadProgress(0, 0, "error")
+					uploadProgressLock.Lock()
+					if uploadProgress != nil {
+						uploadProgress.mu.Lock()
+						uploadProgress.ErrorMessage = fmt.Sprintf("Failed to process %s in zip: %v", zFile.Name, err)
+						uploadProgress.mu.Unlock()
+					}
+					uploadProgressLock.Unlock()
+					return
+				}
+				totalMessages += mCount
+				totalCalls += cCount
+			}
+		}
+
+		if !foundXML {
+			slog.Error("No XML file found inside ZIP archive", "path", filePath)
+			SetUploadProgress(0, 0, "error")
+			uploadProgressLock.Lock()
+			if uploadProgress != nil {
+				uploadProgress.mu.Lock()
+				uploadProgress.ErrorMessage = "No .xml file found inside ZIP archive"
+				uploadProgress.mu.Unlock()
+			}
+			uploadProgressLock.Unlock()
+			return
+		}
+
+		slog.Info("Completed processing zip archive", "messages", totalMessages, "calls", totalCalls)
 		return
 	}
 
@@ -852,7 +947,7 @@ func ProcessUploadedFile(userID string, username string, filePath string) {
 	// Process with streaming parser. batchSize only controls how many rows
 	// share one commit -- rows are still inserted and their data freed one at
 	// a time as decoded, so this doesn't affect peak memory usage.
-	messageCount, callCount, err := ParseSMSBackupStreaming(userDB, file, defaultImportBatchSize)
+	messageCount, callCount, err := ParseSMSBackupStreaming(userDB, file, defaultImportBatchSize, loadMedia)
 	if err != nil {
 		slog.Error("Error processing file", "error", err)
 		SetUploadProgress(0, 0, "error")
@@ -886,7 +981,11 @@ const defaultImportBatchSize = 200
 // re-importable on retry either way, since INSERT ... ON CONFLICT DO NOTHING
 // makes re-running the same file idempotent, but a smaller batch bounds how
 // much re-decoding work a failure near the end of a large import wastes.
-func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int) (int, int, error) {
+func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int, loadMediaOpt ...bool) (int, int, error) {
+	loadMedia := true
+	if len(loadMediaOpt) > 0 {
+		loadMedia = loadMediaOpt[0]
+	}
 	if batchSize <= 0 {
 		batchSize = defaultImportBatchSize
 	}
@@ -1037,7 +1136,7 @@ func ParseSMSBackupStreaming(userDB *sql.DB, r io.Reader, batchSize int) (int, i
 					continue
 				}
 
-				msg, err := convertMMSEntry(mms)
+				msg, err := convertMMSEntry(mms, loadMedia)
 
 				// Clear the MMS struct immediately after conversion to free base64 strings
 				mms.Parts = nil

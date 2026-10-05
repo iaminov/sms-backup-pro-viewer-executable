@@ -117,8 +117,18 @@ func HandleUpload(c echo.Context) error {
 		})
 	}
 
+	// Check if load_media toggle was sent (defaults to true)
+	loadMedia := true
+	if lm := c.QueryParam("load_media"); lm != "" {
+		loadMedia = lm != "false" && lm != "0"
+	} else if lm := c.Request().Header.Get("X-Load-Media"); lm != "" {
+		loadMedia = lm != "false" && lm != "0"
+	} else if lm := c.FormValue("load_media"); lm != "" {
+		loadMedia = lm != "false" && lm != "0"
+	}
+
 	// Start background processing with user context
-	go ProcessUploadedFile(userID, username, tempFilePath)
+	go ProcessUploadedFile(userID, username, tempFilePath, loadMedia)
 
 	// Return immediately - client will poll /api/progress for status
 	return c.JSON(http.StatusOK, UploadResponse{
