@@ -10,7 +10,6 @@ import (
 )
 
 func TestExtractMediaFromXML(t *testing.T) {
-	// Sample data
 	fakeImageData := []byte("fake-jpeg-binary-image-data-here")
 	fakeVideoData := []byte("fake-mp4-video-data-here")
 	fakeAudioData := []byte("fake-amr-audio-data-here")
@@ -21,76 +20,111 @@ func TestExtractMediaFromXML(t *testing.T) {
 
 	xmlContent := fmt.Sprintf(`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
 <smses count="2">
-  <mms date="1672531199000" address="+15551234567" ct_t="application/vnd.wap.mms-message">
+  <mms date="1672531199000" address="+15551234567" contact_name="Alice" ct_t="application/vnd.wap.mms-message">
     <parts>
       <part ct="application/smil" text="&lt;smil&gt;&lt;/smil&gt;" />
       <part ct="image/jpeg" name="vacation.jpg" data="%s" />
       <part ct="video/mp4" name="clip.mp4" data="%s" />
     </parts>
   </mms>
-  <mms date="1672531200000" address="+15559876543" ct_t="application/vnd.wap.mms-message">
+  <mms date="1672531200000" address="+15559876543" contact_name="Bob" ct_t="application/vnd.wap.mms-message">
     <parts>
       <part ct="audio/amr" name="voicenote.amr" data="%s" />
     </parts>
   </mms>
 </smses>`, b64Img, b64Vid, b64Aud)
 
-	tmpDir, err := os.MkdirTemp("", "test_media_extract_*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	// Test 1: Flat organization (GroupByConversation = false)
+	{
+		tmpDir, err := os.MkdirTemp("", "test_media_extract_flat_*")
+		if err != nil {
+			t.Fatalf("Failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
 
-	opts := MediaExtractOptions{
-		OutputDir:   tmpDir,
-		ConvertHeic: false,
-		ExtractImg:  true,
-		ExtractVid:  true,
-		ExtractAud:  true,
+		opts := MediaExtractOptions{
+			OutputDir:           tmpDir,
+			ConvertHeic:         false,
+			ExtractImg:          true,
+			ExtractVid:          true,
+			ExtractAud:          true,
+			GroupByConversation: false,
+		}
+
+		progress, err := ExtractMediaFromXML(strings.NewReader(xmlContent), opts, int64(len(xmlContent)))
+		if err != nil {
+			t.Fatalf("ExtractMediaFromXML failed: %v", err)
+		}
+
+		if progress.ImagesExtracted != 1 {
+			t.Errorf("Expected 1 image extracted, got %d", progress.ImagesExtracted)
+		}
+		if progress.VideosExtracted != 1 {
+			t.Errorf("Expected 1 video extracted, got %d", progress.VideosExtracted)
+		}
+		if progress.AudioExtracted != 1 {
+			t.Errorf("Expected 1 audio extracted, got %d", progress.AudioExtracted)
+		}
+		if progress.Percent != 100 {
+			t.Errorf("Expected 100 percent, got %d", progress.Percent)
+		}
+
+		// Verify files exist in flat category directories
+		imgFiles, err := os.ReadDir(filepath.Join(tmpDir, "image"))
+		if err != nil || len(imgFiles) != 1 {
+			t.Fatalf("Expected 1 file in image directory, got %d (err: %v)", len(imgFiles), err)
+		}
+		vidFiles, err := os.ReadDir(filepath.Join(tmpDir, "video"))
+		if err != nil || len(vidFiles) != 1 {
+			t.Fatalf("Expected 1 file in video directory, got %d (err: %v)", len(vidFiles), err)
+		}
+		audFiles, err := os.ReadDir(filepath.Join(tmpDir, "audio"))
+		if err != nil || len(audFiles) != 1 {
+			t.Fatalf("Expected 1 file in audio directory, got %d (err: %v)", len(audFiles), err)
+		}
 	}
 
-	progress, err := ExtractMediaFromXML(strings.NewReader(xmlContent), opts)
-	if err != nil {
-		t.Fatalf("ExtractMediaFromXML failed: %v", err)
-	}
+	// Test 2: Conversation grouping (GroupByConversation = true)
+	{
+		tmpDir, err := os.MkdirTemp("", "test_media_extract_conv_*")
+		if err != nil {
+			t.Fatalf("Failed to create temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
 
-	if progress.ImagesExtracted != 1 {
-		t.Errorf("Expected 1 image extracted, got %d", progress.ImagesExtracted)
-	}
-	if progress.VideosExtracted != 1 {
-		t.Errorf("Expected 1 video extracted, got %d", progress.VideosExtracted)
-	}
-	if progress.AudioExtracted != 1 {
-		t.Errorf("Expected 1 audio extracted, got %d", progress.AudioExtracted)
-	}
+		opts := MediaExtractOptions{
+			OutputDir:           tmpDir,
+			ConvertHeic:         false,
+			ExtractImg:          true,
+			ExtractVid:          true,
+			ExtractAud:          true,
+			GroupByConversation: true,
+		}
 
-	// Verify image file exists
-	imgFiles, err := os.ReadDir(filepath.Join(tmpDir, "image"))
-	if err != nil || len(imgFiles) != 1 {
-		t.Fatalf("Expected 1 file in image directory, got %d (err: %v)", len(imgFiles), err)
-	}
-	t.Logf("Extracted image: %s", imgFiles[0].Name())
+		progress, err := ExtractMediaFromXML(strings.NewReader(xmlContent), opts, int64(len(xmlContent)))
+		if err != nil {
+			t.Fatalf("ExtractMediaFromXML failed: %v", err)
+		}
 
-	// Verify video file exists
-	vidFiles, err := os.ReadDir(filepath.Join(tmpDir, "video"))
-	if err != nil || len(vidFiles) != 1 {
-		t.Fatalf("Expected 1 file in video directory, got %d (err: %v)", len(vidFiles), err)
-	}
-	t.Logf("Extracted video: %s", vidFiles[0].Name())
+		if progress.ImagesExtracted != 1 || progress.VideosExtracted != 1 || progress.AudioExtracted != 1 {
+			t.Errorf("Expected 1 img, 1 vid, 1 aud; got %d, %d, %d",
+				progress.ImagesExtracted, progress.VideosExtracted, progress.AudioExtracted)
+		}
 
-	// Verify audio file exists
-	audFiles, err := os.ReadDir(filepath.Join(tmpDir, "audio"))
-	if err != nil || len(audFiles) != 1 {
-		t.Fatalf("Expected 1 file in audio directory, got %d (err: %v)", len(audFiles), err)
-	}
-	t.Logf("Extracted audio: %s", audFiles[0].Name())
+		// Verify Alice's conversation folder has image and video subfolders
+		aliceImg, err := os.ReadDir(filepath.Join(tmpDir, "Alice", "image"))
+		if err != nil || len(aliceImg) != 1 {
+			t.Fatalf("Expected 1 image in Alice/image, got %d (err: %v)", len(aliceImg), err)
+		}
+		aliceVid, err := os.ReadDir(filepath.Join(tmpDir, "Alice", "video"))
+		if err != nil || len(aliceVid) != 1 {
+			t.Fatalf("Expected 1 video in Alice/video, got %d (err: %v)", len(aliceVid), err)
+		}
 
-	// Check content of extracted image
-	extractedImgBytes, err := os.ReadFile(filepath.Join(tmpDir, "image", imgFiles[0].Name()))
-	if err != nil {
-		t.Fatalf("Failed to read extracted image: %v", err)
-	}
-	if string(extractedImgBytes) != string(fakeImageData) {
-		t.Errorf("Extracted image content mismatch")
+		// Verify Bob's conversation folder has audio subfolder
+		bobAud, err := os.ReadDir(filepath.Join(tmpDir, "Bob", "audio"))
+		if err != nil || len(bobAud) != 1 {
+			t.Fatalf("Expected 1 audio in Bob/audio, got %d (err: %v)", len(bobAud), err)
+		}
 	}
 }

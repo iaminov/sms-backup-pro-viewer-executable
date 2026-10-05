@@ -33,7 +33,7 @@ function Require-Command($name, $hint) {
 }
 
 Write-Host "SBV Windows Portable Builder (FTS5 + HEIC/libheif + Media Extractor)" -ForegroundColor Green
-Write-Host "This builds lowcarbdev/sbv locally and does not upload your SMS backup anywhere."
+Write-Host "This builds SMS Backup Viewer locally and does not upload your SMS backup anywhere."
 
 if (-not $SkipInstall) {
     Write-Step "Checking build prerequisites with winget"
@@ -89,32 +89,30 @@ Write-Step "Installing native UCRT64 dependencies (GCC, pkg-config, libheif)"
 & $msysBash -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-libheif"
 if ($LASTEXITCODE -ne 0) { throw "Failed to install MSYS2 native dependencies." }
 
-Write-Step "Cloning/checking SBV source"
-New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
-$repo = Join-Path $WorkDir 'sbv'
-if (-not (Test-Path (Join-Path $repo '.git'))) {
-    if (Test-Path $repo) { Remove-Item -Recurse -Force $repo }
-    & git clone --depth 1 https://github.com/lowcarbdev/sbv.git $repo
-    if ($LASTEXITCODE -ne 0) { throw "Could not clone SBV." }
+Write-Step "Checking repository source"
+if (Test-Path (Join-Path $scriptDir 'main.go')) {
+    $repo = $scriptDir
+    Write-Host "Using repository at $repo" -ForegroundColor Green
+} else {
+    New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+    $repo = Join-Path $WorkDir 'sbv'
+    if (-not (Test-Path (Join-Path $repo '.git'))) {
+        if (Test-Path $repo) { Remove-Item -Recurse -Force $repo }
+        & git clone --depth 1 https://github.com/iaminov/sms-backup-pro-viewer-executable.git $repo
+        if ($LASTEXITCODE -ne 0) { throw "Could not clone repository." }
+    }
 }
 
 Write-Step "Building React frontend"
 Push-Location (Join-Path $repo 'frontend')
 try {
-    & npm ci
-    if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
+    & npm install
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed." }
     & npm run build
     if ($LASTEXITCODE -ne 0) { throw "frontend build failed." }
 } finally { Pop-Location }
 
 Write-Step "Preparing Windows-local build"
-# Keep SBV local-only instead of exposing port 8085 on every network interface.
-$mainGo = Join-Path $repo 'main.go'
-$mainText = Get-Content $mainGo -Raw
-$mainText = $mainText.Replace('e.Start(":" + port)', 'e.Start("127.0.0.1:" + port)')
-$mainText = $mainText.Replace('e.Start(":"+port)', 'e.Start("127.0.0.1:"+port)')
-Set-Content -Path $mainGo -Value $mainText -Encoding UTF8
-
 # CGO uses MSYS2 UCRT64 GCC; libheif-go locates libheif through pkg-config.
 $env:CGO_ENABLED = '1'
 $env:CC = 'C:\msys64\ucrt64\bin\gcc.exe'
@@ -148,6 +146,7 @@ Copy-Item (Join-Path $repo 'LICENSE') (Join-Path $OutputDir 'SBV-LICENSE.txt')
 $binDir = 'C:\msys64\ucrt64\bin'
 $queue = New-Object System.Collections.Generic.Queue[string]
 $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$seen.Add('sbv.exe') | Out-Null
 $queue.Enqueue((Join-Path $OutputDir 'sbv.exe'))
 
 function Get-LddDlls([string]$file) {
@@ -215,8 +214,8 @@ endlocal
 Set-Content -Path (Join-Path $OutputDir 'Start SBV.cmd') -Value $launcher -Encoding ASCII
 
 $readme = @'
-SBV Windows Portable (Passwordless + Media Extractor Edition)
-=============================================================
+SMS Backup Viewer & Media Extractor (Portable for Windows)
+==========================================================
 
 Run: Start SBV.cmd
 Then use http://127.0.0.1:8085 in your browser.
@@ -224,7 +223,7 @@ Then use http://127.0.0.1:8085 in your browser.
 What is included
 ----------------
 - sbv.exe: native Windows x64 SBV server (passwordless local-only mode)
-- frontend/dist: SBV React user interface with "Extract Media" feature
+- frontend/dist: SBV React user interface with full Media Extractor modal
 - data/: local database/import storage
 - media/: default folder for extracted image, video, and audio files
 - libheif and required UCRT64 DLLs needed for HEIC/HEIF support
@@ -234,28 +233,27 @@ Media Extraction Feature
 ------------------------
 Click the "Extract Media" button in the top navigation bar to parse your SMS/MMS XML
 backup and extract individual photos, videos, and audio notes into separate folders:
-  - media/image/  (JPEG, PNG, HEIC, GIF, WebP)
-  - media/video/  (MP4, 3GP, MOV)
-  - media/audio/  (AMR, MP3, M4A, AAC)
-  - media/other/  (vCards, attachments)
-
-Files are automatically dated according to the message timestamp and can be opened
-directly in Windows Explorer with the "Open Media Folder" button.
+  - Select Destination Folder with native Windows Explorer folder prompt
+  - Option to create subfolder per conversation (contact or group name)
+  - Automatic organization by media type:
+    - media/image/  (JPEG, PNG, HEIC, GIF, WebP)
+    - media/video/  (MP4, 3GP, MOV)
+    - media/audio/  (AMR, MP3, M4A, AAC)
+    - media/other/  (vCards, attachments)
+  - Real-time loading percentage progress bar
+  - Instant direct local disk reading without browser upload wait
+  - File modification times preserved to match original message dates
 
 Privacy & Access
 ----------------
 The launcher binds to 127.0.0.1, reachable only from this PC.
 No username or password is required—opening the application takes you directly to your conversations.
-
-Large 4 GB backup note
-----------------------
-Keep the XML on a local NTFS drive with substantial free space. Import or media extraction
-streams the file with low memory usage. Do not delete your original SMS Backup & Restore XML.
 '@
 Set-Content -Path (Join-Path $OutputDir 'README-WINDOWS.txt') -Value $readme -Encoding UTF8
 
 # Write provenance/version information.
-$commit = (& git -C $repo rev-parse HEAD).Trim()
+$commit = (& git -C $repo rev-parse HEAD 2>$null)
+if (-not $commit) { $commit = "dev" }
 $versions = @"
 SBV commit: $commit
 Go: $(& go version)

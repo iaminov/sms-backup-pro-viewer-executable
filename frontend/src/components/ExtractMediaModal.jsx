@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
-import { Modal, Button, Form, Alert, ProgressBar, Badge, Tab, Tabs } from 'react-bootstrap'
+import { Modal, Button, Form, Alert, ProgressBar, Badge, Tab, Tabs, InputGroup } from 'react-bootstrap'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -13,6 +13,10 @@ function ExtractMediaModal({ onClose }) {
   const [extractVid, setExtractVid] = useState(true)
   const [extractAud, setExtractAud] = useState(true)
   const [convertHeic, setConvertHeic] = useState(true)
+  const [groupByConversation, setGroupByConversation] = useState(true)
+
+  const [browsingFolder, setBrowsingFolder] = useState(false)
+  const [browsingFile, setBrowsingFile] = useState(false)
 
   const [extracting, setExtracting] = useState(false)
   const [progress, setProgress] = useState(null)
@@ -53,7 +57,35 @@ function ExtractMediaModal({ onClose }) {
       } catch (err) {
         console.error('Failed to poll extraction progress:', err)
       }
-    }, 600)
+    }, 400)
+  }
+
+  const handleBrowseFolder = async () => {
+    try {
+      setBrowsingFolder(true)
+      const res = await axios.post(`${API_BASE}/extract-media/browse-folder`)
+      if (res.data?.path) {
+        setOutputDir(res.data.path)
+      }
+    } catch (err) {
+      console.error('Failed to browse folder:', err)
+    } finally {
+      setBrowsingFolder(false)
+    }
+  }
+
+  const handleBrowseFile = async () => {
+    try {
+      setBrowsingFile(true)
+      const res = await axios.post(`${API_BASE}/extract-media/browse-file`)
+      if (res.data?.path) {
+        setFilePath(res.data.path)
+      }
+    } catch (err) {
+      console.error('Failed to browse XML file:', err)
+    } finally {
+      setBrowsingFile(false)
+    }
   }
 
   const handleStartExtraction = async () => {
@@ -62,7 +94,7 @@ function ExtractMediaModal({ onClose }) {
 
     if (sourceType === 'local') {
       if (!filePath.trim()) {
-        setError('Please enter the full path to your SMS Backup XML file on disk.')
+        setError('Please select or enter the path to your SMS Backup XML file.')
         return
       }
     } else {
@@ -75,12 +107,13 @@ function ExtractMediaModal({ onClose }) {
     setExtracting(true)
     setProgress({
       status: 'extracting',
+      percent: 0,
       processed_mms: 0,
       images_extracted: 0,
       videos_extracted: 0,
       audio_extracted: 0,
       other_extracted: 0,
-      total_bytes: 0
+      extracted_bytes: 0
     })
 
     try {
@@ -91,7 +124,8 @@ function ExtractMediaModal({ onClose }) {
           convert_heic: convertHeic,
           extract_images: extractImg,
           extract_videos: extractVid,
-          extract_audio: extractAud
+          extract_audio: extractAud,
+          group_by_conversation: groupByConversation
         }
         await axios.post(`${API_BASE}/extract-media`, payload)
       } else {
@@ -102,6 +136,7 @@ function ExtractMediaModal({ onClose }) {
         formData.append('extract_images', extractImg ? 'true' : 'false')
         formData.append('extract_videos', extractVid ? 'true' : 'false')
         formData.append('extract_audio', extractAud ? 'true' : 'false')
+        formData.append('group_by_conversation', groupByConversation ? 'true' : 'false')
 
         await axios.post(`${API_BASE}/extract-media`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' }
@@ -148,7 +183,7 @@ function ExtractMediaModal({ onClose }) {
       </Modal.Header>
       <Modal.Body>
         <p className="text-muted small mb-3">
-          Extract and save individual media attachments (photos, videos, audio notes) from your SMS Backup &amp; Restore XML file into a dedicated folder with subfolders for each media type.
+          Extract and decode all photos, videos, and audio attachments embedded inside your SMS/MMS XML backup file into organized folders on your computer.
         </p>
 
         {error && (
@@ -164,7 +199,7 @@ function ExtractMediaModal({ onClose }) {
               <Badge bg="success">{progress.duration}</Badge>
             </div>
             <p className="mb-2 small">
-              All media files have been organized and saved to: <code>{progress.output_dir}</code>
+              All media files have been extracted and organized in: <code>{progress.output_dir}</code>
             </p>
             <div className="d-flex flex-wrap gap-2 mb-3">
               <Badge bg="primary" className="p-2">🖼️ {progress.images_extracted} Images</Badge>
@@ -173,29 +208,41 @@ function ExtractMediaModal({ onClose }) {
               {progress.other_extracted > 0 && (
                 <Badge bg="dark" className="p-2">📎 {progress.other_extracted} Other</Badge>
               )}
-              <Badge bg="light" text="dark" className="p-2">💾 {formatBytes(progress.total_bytes)} Total</Badge>
+              <Badge bg="light" text="dark" className="p-2">💾 {formatBytes(progress.extracted_bytes || progress.total_bytes)} Total</Badge>
             </div>
-            <div className="d-flex gap-2">
-              <Button variant="outline-success" size="sm" onClick={handleOpenFolder}>
-                📂 Open Media Folder in Windows Explorer
+            <div className="d-flex gap-2 align-items-center">
+              <Button variant="success" size="sm" onClick={handleOpenFolder} className="d-flex align-items-center gap-1">
+                <span>📁</span> Open Media Folder in Windows Explorer
               </Button>
-              {openedFolder && <span className="text-success align-self-center small">Opening folder...</span>}
+              {openedFolder && <span className="text-success small fw-semibold">Opening folder...</span>}
             </div>
           </Alert>
         )}
 
         {extracting && (
-          <div className="p-3 mb-4 rounded border bg-light">
+          <div className="p-3 mb-4 rounded border bg-light shadow-sm">
             <div className="d-flex justify-content-between align-items-center mb-2">
-              <span className="fw-semibold">Extracting Media Files...</span>
-              <span className="badge bg-primary">MMS Processed: {progress?.processed_mms || 0}</span>
+              <span className="fw-bold text-primary">
+                Extracting Media Files ({progress?.percent || 0}%)
+              </span>
+              <span className="badge bg-secondary">MMS Processed: {progress?.processed_mms || 0}</span>
             </div>
-            <ProgressBar animated now={100} variant="primary" className="mb-3" style={{ height: '8px' }} />
+            <ProgressBar
+              animated={true}
+              now={progress?.percent || 0}
+              label={`${progress?.percent || 0}%`}
+              variant="success"
+              style={{ height: '22px', fontSize: '0.85rem', fontWeight: 'bold' }}
+              className="mb-3"
+            />
             <div className="d-flex flex-wrap gap-2 small">
               <Badge bg="primary">🖼️ Images: {progress?.images_extracted || 0}</Badge>
               <Badge bg="info">🎥 Videos: {progress?.videos_extracted || 0}</Badge>
               <Badge bg="secondary">🎵 Audio: {progress?.audio_extracted || 0}</Badge>
-              <Badge bg="light" text="dark">💾 Extracted: {formatBytes(progress?.total_bytes || 0)}</Badge>
+              {progress?.other_extracted > 0 && (
+                <Badge bg="dark">📎 Other: {progress?.other_extracted || 0}</Badge>
+              )}
+              <Badge bg="light" text="dark">💾 {formatBytes(progress?.extracted_bytes || 0)} Extracted</Badge>
             </div>
           </div>
         )}
@@ -206,24 +253,35 @@ function ExtractMediaModal({ onClose }) {
             onSelect={(k) => setSourceType(k)}
             className="mb-3"
           >
-            <Tab eventKey="local" title="Local XML File (Fastest)">
+            <Tab eventKey="local" title="Local XML File (Recommended - Fastest)">
               <Form.Group className="mb-3">
-                <Form.Label className="fw-semibold small">Full XML File Path on PC</Form.Label>
-                <Form.Control
-                  type="text"
-                  placeholder="e.g. C:\Users\YourName\Documents\sms-2024.xml"
-                  value={filePath}
-                  onChange={(e) => setFilePath(e.target.value)}
-                  disabled={extracting}
-                />
+                <Form.Label className="fw-semibold small">Select SMS Backup XML File</Form.Label>
+                <InputGroup>
+                  <Form.Control
+                    type="text"
+                    placeholder="Click Browse or enter path to XML file..."
+                    value={filePath}
+                    onChange={(e) => setFilePath(e.target.value)}
+                    disabled={extracting}
+                  />
+                  <Button
+                    variant="outline-primary"
+                    onClick={handleBrowseFile}
+                    disabled={extracting || browsingFile}
+                    className="d-flex align-items-center gap-1"
+                  >
+                    <span>📄</span>
+                    {browsingFile ? 'Opening...' : 'Browse XML File...'}
+                  </Button>
+                </InputGroup>
                 <Form.Text className="text-muted">
-                  Instant processing directly from your local drive without waiting for large multi-GB uploads.
+                  Reads directly from disk with zero memory overhead or browser upload waiting time.
                 </Form.Text>
               </Form.Group>
             </Tab>
-            <Tab eventKey="upload" title="Upload XML File">
+            <Tab eventKey="upload" title="Upload XML from Browser">
               <Form.Group className="mb-3">
-                <Form.Label className="fw-semibold small">Select XML Backup</Form.Label>
+                <Form.Label className="fw-semibold small">Choose XML Backup</Form.Label>
                 <Form.Control
                   type="file"
                   accept=".xml"
@@ -231,7 +289,7 @@ function ExtractMediaModal({ onClose }) {
                   disabled={extracting}
                 />
                 <Form.Text className="text-muted">
-                  Select an XML backup from your file browser.
+                  Select an XML backup from your computer.
                 </Form.Text>
               </Form.Group>
             </Tab>
@@ -239,16 +297,46 @@ function ExtractMediaModal({ onClose }) {
 
           <Form.Group className="mb-3">
             <Form.Label className="fw-semibold small">Destination Directory</Form.Label>
-            <Form.Control
-              type="text"
-              value={outputDir}
-              onChange={(e) => setOutputDir(e.target.value)}
-              disabled={extracting}
-            />
+            <InputGroup>
+              <Form.Control
+                type="text"
+                value={outputDir}
+                onChange={(e) => setOutputDir(e.target.value)}
+                disabled={extracting}
+              />
+              <Button
+                variant="outline-secondary"
+                onClick={handleBrowseFolder}
+                disabled={extracting || browsingFolder}
+                className="d-flex align-items-center gap-1"
+              >
+                <span>📁</span>
+                {browsingFolder ? 'Opening...' : 'Browse Folder...'}
+              </Button>
+            </InputGroup>
             <Form.Text className="text-muted">
-              Subdirectories will automatically be created: <code>/image</code>, <code>/video</code>, <code>/audio</code>
+              Select or type the destination folder where extracted media will be stored.
             </Form.Text>
           </Form.Group>
+
+          <div className="mb-3 p-3 bg-light rounded border">
+            <Form.Check
+              type="checkbox"
+              id="group-by-conversation"
+              label="Create separate subfolders for each conversation"
+              checked={groupByConversation}
+              onChange={(e) => setGroupByConversation(e.target.checked)}
+              disabled={extracting}
+              className="fw-semibold"
+            />
+            <div className="text-muted small ps-4 mt-1">
+              {groupByConversation ? (
+                <span>Files will be organized by contact/group name: <code>Destination/&lt;ContactName&gt;/image/</code>, <code>video/</code>, <code>audio/</code></span>
+              ) : (
+                <span>All files will be placed into central media type folders: <code>Destination/image/</code>, <code>video/</code>, <code>audio/</code></span>
+              )}
+            </div>
+          </div>
 
           <div className="mb-3 p-3 bg-body-tertiary rounded border">
             <Form.Label className="fw-semibold small d-block mb-2">Media Types to Extract</Form.Label>
@@ -280,7 +368,7 @@ function ExtractMediaModal({ onClose }) {
               <Form.Check
                 type="checkbox"
                 id="convert-heic"
-                label="Convert HEIC images to JPEG"
+                label="Convert Apple HEIC images to JPEG"
                 checked={convertHeic}
                 onChange={(e) => setConvertHeic(e.target.checked)}
                 disabled={extracting}

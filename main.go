@@ -159,6 +159,8 @@ func main() {
 	protected.POST("/extract-media", internal.HandleExtractMedia)
 	protected.GET("/extract-media/progress", internal.HandleExtractMediaProgress)
 	protected.POST("/extract-media/open-folder", internal.HandleOpenMediaFolder)
+	protected.POST("/extract-media/browse-folder", internal.HandleBrowseFolder)
+	protected.POST("/extract-media/browse-file", internal.HandleBrowseXMLFile)
 	protected.GET("/conversations", internal.HandleConversations)
 	protected.GET("/messages", internal.HandleMessages)
 	protected.GET("/activity", internal.HandleActivity)
@@ -229,70 +231,56 @@ func main() {
 		port = "8085"
 	}
 
-	// Create HTTP server with longer timeouts for large file uploads
-	server := &http.Server{
-		Addr:              ":" + port,
-		ReadTimeout:       30 * time.Minute, // Allow 30 minutes for reading large uploads
-		WriteTimeout:      30 * time.Minute, // Allow 30 minutes for writing responses
-		ReadHeaderTimeout: 1 * time.Minute,  // Header read timeout
-		IdleTimeout:       2 * time.Minute,  // Idle connection timeout
-		MaxHeaderBytes:    1 << 20,          // 1 MB max header size
-	}
+	bindHost := "127.0.0.1"
+	addr := bindHost + ":" + port
 
-	logger.Info("Server starting", "port", port)
-	logger.Info("Upload timeout set to 30 minutes for large backup files")
-
-	e.Server = server
-	// Start server
-	if err := e.Start("127.0.0.1:" + port); err != nil && err != http.ErrServerClosed {
+	logger.Info("Starting server", "address", addr, "port", port, "bindHost", bindHost)
+	if err := e.Start(addr); err != nil && err != http.ErrServerClosed {
 		logger.Error("Server failed to start", "error", err)
 		os.Exit(1)
 	}
 }
 
-// handleResetPassword prompts for a new password and resets it for the given username
 func handleResetPassword(username string) error {
-	// Look up the user
-	user, err := internal.GetUserByUsername(username)
-	if err != nil {
-		return fmt.Errorf("user '%s' not found", username)
-	}
+	var newPassword string
+	var confirmPassword string
 
-	// Prompt for new password
-	fmt.Print("Enter new password: ")
-	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
+	fmt.Printf("Enter new password for %s: ", username)
+	bytePassword, err := term.ReadPassword(int(os.Stdin.Fd()))
 	if err != nil {
 		return fmt.Errorf("failed to read password: %w", err)
 	}
-
-	// Prompt for password confirmation
-	fmt.Print("Confirm new password: ")
-	confirmBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
-	if err != nil {
-		return fmt.Errorf("failed to read password confirmation: %w", err)
+	newPassword = strings.TrimSpace(string(bytePassword))
+
+	if len(newPassword) < 8 {
+		return fmt.Errorf("password must be at least 8 characters long")
 	}
 
-	password := string(passwordBytes)
-	if password != string(confirmBytes) {
+	fmt.Printf("Confirm new password: ")
+	byteConfirm, err := term.ReadPassword(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+	fmt.Println()
+	confirmPassword = strings.TrimSpace(string(byteConfirm))
+
+	if newPassword != confirmPassword {
 		return fmt.Errorf("passwords do not match")
 	}
 
-	if len(password) < 6 {
-		return fmt.Errorf("password must be at least 6 characters")
+	user, err := internal.GetUserByUsername(username)
+	if err != nil {
+		return err
+	}
+	if err := internal.UpdatePassword(user.ID, newPassword); err != nil {
+		return fmt.Errorf("failed to reset password: %w", err)
 	}
 
-	// Update the password
-	if err := internal.UpdatePassword(user.ID, password); err != nil {
-		return fmt.Errorf("failed to update password: %w", err)
-	}
-
-	fmt.Printf("Password reset successfully for user '%s'\n", username)
+	fmt.Printf("Password successfully reset for user %s\n", username)
 	return nil
 }
 
-// handleListUsers lists all users with their usernames, UUIDs, and ingest directories
 func handleListUsers(dbPathPrefix string) error {
 	users, err := internal.ListUsers()
 	if err != nil {
@@ -305,19 +293,22 @@ func handleListUsers(dbPathPrefix string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "USERNAME\tUUID\tINGEST DIRECTORY")
-	fmt.Fprintln(w, "--------\t----\t----------------")
+	fmt.Fprintln(w, "ID\tUSERNAME\tMESSAGE COUNT\tCREATED AT")
+	fmt.Fprintln(w, "--\t--------\t-------------\t----------")
 
-	for _, user := range users {
-		ingestDir := filepath.Join(dbPathPrefix, "data", user.ID, "ingest")
-		fmt.Fprintf(w, "%s\t%s\t%s\n", user.Username, user.ID, ingestDir)
+	for _, u := range users {
+		msgCount := 0
+		userDB, err := internal.GetUserDB(u.ID, u.Username)
+		if err == nil {
+			var count int
+			if err := userDB.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count); err == nil {
+				msgCount = count
+			}
+		}
+
+		createdAt := u.CreatedAt.Format("2006-01-02 15:04:05")
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", u.ID, u.Username, msgCount, createdAt)
 	}
 
-	w.Flush()
-	return nil
+	return w.Flush()
 }
-
-
-
-
-

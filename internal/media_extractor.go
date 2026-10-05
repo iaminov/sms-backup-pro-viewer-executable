@@ -21,13 +21,16 @@ import (
 )
 
 type MediaExtractProgress struct {
+	TotalBytes      int64     `json:"total_bytes"`
+	BytesRead       int64     `json:"bytes_read"`
+	Percent         int       `json:"percent"`
 	TotalMMS        int       `json:"total_mms"`
 	ProcessedMMS    int       `json:"processed_mms"`
 	ImagesExtracted int       `json:"images_extracted"`
 	VideosExtracted int       `json:"videos_extracted"`
 	AudioExtracted  int       `json:"audio_extracted"`
 	OtherExtracted  int       `json:"other_extracted"`
-	TotalBytes      int64     `json:"total_bytes"`
+	ExtractedBytes  int64     `json:"extracted_bytes"`
 	Status          string    `json:"status"` // "idle", "extracting", "completed", "error"
 	ErrorMessage    string    `json:"error_message,omitempty"`
 	OutputDir       string    `json:"output_dir"`
@@ -36,12 +39,13 @@ type MediaExtractProgress struct {
 }
 
 type MediaExtractOptions struct {
-	FilePath    string `json:"file_path"`
-	OutputDir   string `json:"output_dir"`
-	ConvertHeic bool   `json:"convert_heic"`
-	ExtractImg  bool   `json:"extract_images"`
-	ExtractVid  bool   `json:"extract_videos"`
-	ExtractAud  bool   `json:"extract_audio"`
+	FilePath            string `json:"file_path"`
+	OutputDir           string `json:"output_dir"`
+	ConvertHeic         bool   `json:"convert_heic"`
+	ExtractImg          bool   `json:"extract_images"`
+	ExtractVid          bool   `json:"extract_videos"`
+	ExtractAud          bool   `json:"extract_audio"`
+	GroupByConversation bool   `json:"group_by_conversation"`
 }
 
 var (
@@ -67,7 +71,6 @@ func GetMediaExtractProgress() *MediaExtractProgress {
 			OutputDir: GetDefaultMediaDir(),
 		}
 	}
-	// Return copy
 	copy := *extractProgress
 	return &copy
 }
@@ -87,6 +90,77 @@ func sanitizeFilename(name string) string {
 		return ""
 	}
 	return clean
+}
+
+func sanitizeFolderName(name string) string {
+	clean := invalidFilenameRe.ReplaceAllString(name, "_")
+	clean = strings.Trim(clean, " ._")
+	if clean == "" {
+		return "Unknown_Conversation"
+	}
+	if len(clean) > 60 {
+		clean = clean[:60]
+	}
+	return clean
+}
+
+func getConversationFolderName(mms MMSEntry) string {
+	// Try contact name first
+	contact := strings.TrimSpace(mms.ContactName)
+	if contact != "" && !strings.EqualFold(contact, "null") && !strings.EqualFold(contact, "(unknown)") {
+		return sanitizeFolderName(contact)
+	}
+
+	// If no contact name, try address
+	addr := strings.TrimSpace(mms.Address)
+	if addr != "" && !strings.EqualFold(addr, "null") && !strings.EqualFold(addr, "(unknown)") {
+		if strings.Contains(addr, "~") {
+			parts := strings.Split(addr, "~")
+			var clean []string
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					clean = append(clean, normalizePhoneNumber(p))
+				}
+			}
+			if len(clean) > 0 {
+				joined := strings.Join(clean, ", ")
+				if len(joined) > 50 {
+					joined = joined[:50] + "..."
+				}
+				return sanitizeFolderName("Group (" + joined + ")")
+			}
+		}
+		return sanitizeFolderName(normalizePhoneNumber(addr))
+	}
+
+	// Try mms.Addrs
+	if len(mms.Addrs) > 0 {
+		var addrs []string
+		for _, a := range mms.Addrs {
+			trimmed := strings.TrimSpace(a.Address)
+			if trimmed != "" && !strings.EqualFold(trimmed, "null") && !strings.EqualFold(trimmed, "insert-address-token") {
+				addrs = append(addrs, normalizePhoneNumber(trimmed))
+			}
+		}
+		if len(addrs) > 1 {
+			joined := strings.Join(addrs, ", ")
+			if len(joined) > 50 {
+				joined = joined[:50] + "..."
+			}
+			return sanitizeFolderName("Group (" + joined + ")")
+		} else if len(addrs) == 1 {
+			return sanitizeFolderName(addrs[0])
+		}
+	}
+
+	// Fallback to subject if non-empty
+	subj := strings.TrimSpace(mms.Subject)
+	if subj != "" && !strings.EqualFold(subj, "null") {
+		return sanitizeFolderName(subj)
+	}
+
+	return "Unknown_Conversation"
 }
 
 func getExtensionForContentType(ct string) string {
@@ -205,8 +279,45 @@ func getUniqueFilePath(dir, filename string) string {
 	}
 }
 
+type progressCountingReader struct {
+	reader       io.Reader
+	totalBytes   int64
+	bytesRead    int64
+	lastReported time.Time
+}
+
+func (pcr *progressCountingReader) Read(p []byte) (int, error) {
+	n, err := pcr.reader.Read(p)
+	if n > 0 {
+		pcr.bytesRead += int64(n)
+		if time.Since(pcr.lastReported) >= 150*time.Millisecond {
+			pcr.lastReported = time.Now()
+			pct := 0
+			if pcr.totalBytes > 0 {
+				pct = int((pcr.bytesRead * 100) / pcr.totalBytes)
+				if pct > 99 {
+					pct = 99
+				}
+			}
+			updateMediaProgress(func(prog *MediaExtractProgress) {
+				prog.BytesRead = pcr.bytesRead
+				prog.Percent = pct
+			})
+		}
+	}
+	if err == io.EOF {
+		updateMediaProgress(func(prog *MediaExtractProgress) {
+			prog.BytesRead = pcr.bytesRead
+			if pcr.totalBytes > 0 {
+				prog.Percent = 100
+			}
+		})
+	}
+	return n, err
+}
+
 // ExtractMediaFromXML streams an SMS/MMS XML file and extracts all media files into subfolders
-func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaExtractProgress, error) {
+func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions, totalSize ...int64) (*MediaExtractProgress, error) {
 	outDir := opts.OutputDir
 	if strings.TrimSpace(outDir) == "" {
 		outDir = GetDefaultMediaDir()
@@ -216,27 +327,41 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 		absOutDir = outDir
 	}
 
-	// Prepare subdirectories
-	imgDir := filepath.Join(absOutDir, "image")
-	vidDir := filepath.Join(absOutDir, "video")
-	audDir := filepath.Join(absOutDir, "audio")
-	othDir := filepath.Join(absOutDir, "other")
-
-	for _, d := range []string{imgDir, vidDir, audDir, othDir} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", d, err)
+	// Prepare base subdirectories if not grouping by conversation
+	if !opts.GroupByConversation {
+		for _, d := range []string{"image", "video", "audio", "other"} {
+			if err := os.MkdirAll(filepath.Join(absOutDir, d), 0755); err != nil {
+				return nil, fmt.Errorf("failed to create directory %s: %w", d, err)
+			}
 		}
+	} else {
+		if err := os.MkdirAll(absOutDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create output directory %s: %w", absOutDir, err)
+		}
+	}
+
+	var size int64
+	if len(totalSize) > 0 {
+		size = totalSize[0]
 	}
 
 	extractProgressLock.Lock()
 	extractProgress = &MediaExtractProgress{
-		Status:    "extracting",
-		OutputDir: absOutDir,
-		StartTime: time.Now(),
+		Status:     "extracting",
+		OutputDir:  absOutDir,
+		StartTime:  time.Now(),
+		TotalBytes: size,
+		Percent:    0,
 	}
 	extractProgressLock.Unlock()
 
-	decoder := xml.NewDecoder(xmlReader)
+	countingReader := &progressCountingReader{
+		reader:       xmlReader,
+		totalBytes:   size,
+		lastReported: time.Now(),
+	}
+
+	decoder := xml.NewDecoder(countingReader)
 	mmsCount := 0
 
 	for {
@@ -265,6 +390,15 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 			var dateMs int64
 			if mms.Date != "" {
 				dateMs, _ = strconv.ParseInt(mms.Date, 10, 64)
+			}
+
+			// Determine target directory base
+			var convDir string
+			if opts.GroupByConversation {
+				convFolderName := getConversationFolderName(mms)
+				convDir = filepath.Join(absOutDir, convFolderName)
+			} else {
+				convDir = absOutDir
 			}
 
 			for partIdx, part := range mms.Parts {
@@ -296,16 +430,9 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 				ext := getExtensionForContentType(part.ContentType)
 				filename := generateMediaFilename(part, dateMs, mmsCount, partIdx+1, ext)
 
-				var targetSubDir string
-				switch subfolder {
-				case "image":
-					targetSubDir = imgDir
-				case "video":
-					targetSubDir = vidDir
-				case "audio":
-					targetSubDir = audDir
-				default:
-					targetSubDir = othDir
+				targetSubDir := filepath.Join(convDir, subfolder)
+				if err := os.MkdirAll(targetSubDir, 0755); err != nil {
+					continue
 				}
 
 				outPath := getUniqueFilePath(targetSubDir, filename)
@@ -326,7 +453,7 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 						default:
 							p.OtherExtracted++
 						}
-						p.TotalBytes += int64(len(data))
+						p.ExtractedBytes += int64(len(data))
 					})
 				}
 
@@ -335,7 +462,8 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 					jpgData, err := convertHEICtoJPEG(data)
 					if err == nil && len(jpgData) > 0 {
 						jpgName := strings.TrimSuffix(filepath.Base(outPath), filepath.Ext(outPath)) + ".jpg"
-						jpgPath := getUniqueFilePath(imgDir, jpgName)
+						imgSubDir := filepath.Join(convDir, "image")
+						jpgPath := getUniqueFilePath(imgSubDir, jpgName)
 						if err := os.WriteFile(jpgPath, jpgData, 0644); err == nil {
 							if dateMs > 0 {
 								msgTime := time.Unix(dateMs/1000, 0)
@@ -345,15 +473,13 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 					}
 				}
 
-				// Free memory immediately
 				data = nil
 			}
 
-			// Free MMS memory
 			mms.Parts = nil
 			mms = MMSEntry{}
 
-			if mmsCount%50 == 0 {
+			if mmsCount%25 == 0 {
 				updateMediaProgress(func(p *MediaExtractProgress) {
 					p.ProcessedMMS = mmsCount
 				})
@@ -365,6 +491,7 @@ func ExtractMediaFromXML(xmlReader io.Reader, opts MediaExtractOptions) (*MediaE
 	updateMediaProgress(func(p *MediaExtractProgress) {
 		p.ProcessedMMS = mmsCount
 		p.Status = "completed"
+		p.Percent = 100
 		p.Duration = duration.Round(time.Millisecond).String()
 	})
 
@@ -386,8 +513,8 @@ func HandleExtractMedia(c echo.Context) error {
 	opts.ExtractVid = true
 	opts.ExtractAud = true
 	opts.ConvertHeic = true
+	opts.GroupByConversation = false
 
-	// Check if request is multipart form (file upload) or JSON (local path)
 	contentType := c.Request().Header.Get("Content-Type")
 
 	if strings.Contains(contentType, "multipart/form-data") {
@@ -415,8 +542,10 @@ func HandleExtractMedia(c echo.Context) error {
 		if aud := c.FormValue("extract_audio"); aud != "" {
 			opts.ExtractAud = aud == "true" || aud == "1"
 		}
+		if group := c.FormValue("group_by_conversation"); group != "" {
+			opts.GroupByConversation = group == "true" || group == "1"
+		}
 
-		// Save uploaded file to temp file so extraction can run in background
 		tempFile, err := os.CreateTemp("", "extract-xml-*.xml")
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -436,6 +565,7 @@ func HandleExtractMedia(c echo.Context) error {
 		}
 
 		tempPath := tempFile.Name()
+		fileSize := header.Size
 		go func() {
 			defer os.Remove(tempPath)
 			f, err := os.Open(tempPath)
@@ -447,7 +577,7 @@ func HandleExtractMedia(c echo.Context) error {
 				return
 			}
 			defer f.Close()
-			_, _ = ExtractMediaFromXML(f, opts)
+			_, _ = ExtractMediaFromXML(f, opts, fileSize)
 		}()
 
 		return c.JSON(http.StatusOK, map[string]interface{}{
@@ -472,8 +602,8 @@ func HandleExtractMedia(c echo.Context) error {
 		})
 	}
 
-	// Verify file exists
-	if _, err := os.Stat(opts.FilePath); os.IsNotExist(err) {
+	fi, err := os.Stat(opts.FilePath)
+	if os.IsNotExist(err) {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"success": false,
 			"error":   "Specified XML file does not exist on disk: " + opts.FilePath,
@@ -481,6 +611,7 @@ func HandleExtractMedia(c echo.Context) error {
 	}
 
 	filePath := opts.FilePath
+	fileSize := fi.Size()
 	go func() {
 		f, err := os.Open(filePath)
 		if err != nil {
@@ -491,7 +622,7 @@ func HandleExtractMedia(c echo.Context) error {
 			return
 		}
 		defer f.Close()
-		_, _ = ExtractMediaFromXML(f, opts)
+		_, _ = ExtractMediaFromXML(f, opts, fileSize)
 	}()
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -544,5 +675,73 @@ func HandleOpenMediaFolder(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"success": true,
 		"path":    targetDir,
+	})
+}
+
+// HandleBrowseFolder opens a native Windows FolderBrowserDialog to pick a directory
+func HandleBrowseFolder(c echo.Context) error {
+	if runtime.GOOS != "windows" {
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"path": "",
+		})
+	}
+
+	script := `
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Select Folder to Save Extracted Media"
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $dialog.SelectedPath
+}
+`
+	cmd := exec.Command("powershell", "-NoProfile", "-Sta", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Warn("Failed to run folder browser dialog", "error", err)
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"path":  "",
+			"error": err.Error(),
+		})
+	}
+
+	path := strings.TrimSpace(string(out))
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"path": path,
+	})
+}
+
+// HandleBrowseXMLFile opens a native Windows OpenFileDialog to pick an XML file
+func HandleBrowseXMLFile(c echo.Context) error {
+	if runtime.GOOS != "windows" {
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"path": "",
+		})
+	}
+
+	script := `
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Filter = "SMS Backup XML (*.xml)|*.xml|All Files (*.*)|*.*"
+$dialog.Title = "Select SMS Backup & Restore XML File"
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $dialog.FileName
+}
+`
+	cmd := exec.Command("powershell", "-NoProfile", "-Sta", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Warn("Failed to run file browser dialog", "error", err)
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"path":  "",
+			"error": err.Error(),
+		})
+	}
+
+	path := strings.TrimSpace(string(out))
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"path": path,
 	})
 }
