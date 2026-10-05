@@ -520,6 +520,10 @@ func TestHandleSearchWithLimit(t *testing.T) {
 }
 
 func TestHandleProgress(t *testing.T) {
+	uploadProgressLock.Lock()
+	uploadProgress = nil
+	uploadProgressLock.Unlock()
+
 	c, rec := setupTestContext(http.MethodGet, "/api/progress", "")
 
 	if err := HandleProgress(c); err != nil {

@@ -21,7 +21,11 @@ if ([string]::IsNullOrWhiteSpace($scriptDir)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-    $OutputDir = Join-Path $scriptDir 'SBV-Windows-Portable'
+    if (Test-Path (Join-Path $scriptDir 'SBV-Windows-Builder\SBV-Windows-Portable')) {
+        $OutputDir = Join-Path $scriptDir 'SBV-Windows-Builder\SBV-Windows-Portable'
+    } else {
+        $OutputDir = Join-Path $scriptDir 'SBV-Windows-Portable'
+    }
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
@@ -32,7 +36,7 @@ function Require-Command($name, $hint) {
     }
 }
 
-Write-Host "SBV Windows Portable Builder (FTS5 + HEIC/libheif + Media Extractor)" -ForegroundColor Green
+Write-Host "SBV Windows Portable Builder (FTS5 + HEIC/libheif + Media Extractor + Backup Merger)" -ForegroundColor Green
 Write-Host "This builds SMS Backup Viewer locally and does not upload your SMS backup anywhere."
 
 if (-not $SkipInstall) {
@@ -214,8 +218,8 @@ endlocal
 Set-Content -Path (Join-Path $OutputDir 'Start SBV.cmd') -Value $launcher -Encoding ASCII
 
 $readme = @'
-SMS Backup Viewer & Media Extractor (Portable for Windows)
-==========================================================
+SMS Backup Viewer, Media Extractor & Backup Merger (Portable for Windows)
+========================================================================
 
 Run: Start SBV.cmd
 Then use http://127.0.0.1:8085 in your browser.
@@ -223,11 +227,22 @@ Then use http://127.0.0.1:8085 in your browser.
 What is included
 ----------------
 - sbv.exe: native Windows x64 SBV server (passwordless local-only mode)
-- frontend/dist: SBV React user interface with full Media Extractor modal
+- frontend/dist: SBV React user interface with Media Extractor & Backup Merger modals
 - data/: local database/import storage
 - media/: default folder for extracted image, video, and audio files
 - libheif and required UCRT64 DLLs needed for HEIC/HEIF support
 - libheif-plugins/: codec plugins when supplied by the installed MSYS2 package
+
+Merge Backups Feature
+---------------------
+Click the "Merge Backups" button in the top navigation bar to recursively scan any folder
+and all subfolders for both extracted (.xml) and unextracted (.zip) backup archives:
+  - Consolidates all found messages into 1 giant, unified XML backup file
+  - Complete duplicate elimination across overlapping backup archives
+  - Strict chronological ordering (earliest to latest)
+  - Schema normalization: conforms older backups to the latest Android / SMS Backup format
+  - Toggle to include or strip embedded base64 media (for ultra-fast, lightweight XMLs)
+  - Disk-backed streaming pipeline designed for constant low RAM usage (< 50 MB) even on 20+ GB datasets
 
 Media Extraction Feature
 ------------------------
@@ -262,6 +277,7 @@ Built: $(Get-Date -Format o)
 Build tags: fts5 heic
 Passwordless mode: true
 Media extractor: true
+Backup merger: true
 libheif package:
 $(& $msysBash -lc "pacman -Q mingw-w64-ucrt-x86_64-libheif 2>/dev/null")
 "@
@@ -272,7 +288,7 @@ $zip = "$OutputDir.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Start-Sleep -Seconds 1
 if (Get-Command tar.exe -ErrorAction SilentlyContinue) {
-    & tar.exe -a -cf $zip -C $OutputDir *
+    & tar.exe --exclude="*.db*" --exclude="*.log" --exclude="*.tmp" -a -cf $zip -C $OutputDir *
 } else {
     Compress-Archive -Path "$OutputDir\*" -DestinationPath $zip -CompressionLevel Optimal
 }

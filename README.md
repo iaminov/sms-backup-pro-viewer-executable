@@ -113,3 +113,17 @@ The script will automatically:
 4. Compile `sbv.exe` with CGO build tags `fts5 heic`.
 5. Recursively discover and bundle all required native Windows DLLs alongside `sbv.exe`.
 6. Package the final standalone distribution into `SBV-Windows-Portable` and `SBV-Windows-Portable.zip`.
+
+
+---
+
+## Repository Layout & Streamlined Architecture
+
+The repository is organized to maintain a clean separation between source code, build scripts, and portable distribution artifacts:
+
+- **`Build-SBV-Windows.ps1`**: The single root PowerShell build script. Automates toolchain checks, native CGO/libheif dependencies, frontend compilation, executable building, DLL dependency harvesting, and portable packaging.
+- **`main.go` & `internal/`**: The core Go backend service (streaming XML parser, SQLite FTS5 database, media extraction engine, Signal backup decryption, and multi-format deduplication merger).
+- **`frontend/`**: The React 19 web application (Vite, Bootstrap, Recharts, lazy media viewer, modals).
+- **`SBV-Windows-Builder/`**: Output directory for build artifacts:
+  - **`SBV-Windows-Portable/`**: The standalone Windows distribution containing `sbv.exe`, `Start SBV.cmd`, precompiled `frontend/dist/`, and all bundled native UCRT64 codec DLLs (`libheif.dll`, `libde265.dll`, `libx265.dll`, etc.).
+  - **`SBV-Windows-Portable.zip`**: The packaged, self-contained zip archive for end-user distribution.
