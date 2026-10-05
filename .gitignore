@@ -1,0 +1,31 @@
+# Binaries and portable distribution outputs
+*.exe
+*.dll
+*.zip
+SBV-Windows-Portable/
+media/
+data/
+
+# Backend databases & temporary files
+tmp/
+*.db
+*.db-shm
+*.db-wal
+messages.db
+build-errors.log
+sbv
+sbv-server
+
+# Frontend dependencies and build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env
+
+# General & IDE
+*.log
+*.tmp
+.DS_Store
+._.DS_Store
+.vscode/
+.idea/
