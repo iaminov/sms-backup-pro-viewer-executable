@@ -1203,27 +1203,10 @@ func HandleGetMergeProgress(c echo.Context) error {
 }
 
 func HandleBrowseMergeFolder(c echo.Context) error {
-	if runtime.GOOS != "windows" {
-		return c.JSON(http.StatusOK, map[string]interface{}{"path": ""})
-	}
-
-	script := `
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = "Select Folder Containing XML and ZIP Backups to Merge"
-$dialog.ShowNewFolderButton = $false
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    Write-Output $dialog.SelectedPath
-}
-`
-	cmd := exec.Command("powershell", "-NoProfile", "-Sta", "-Command", script)
-	out, err := cmd.Output()
+	path, err := ShowModernFolderPicker("Select Folder Containing XML, ZIP, Signal, and Google Voice Backups to Merge", "")
 	if err != nil {
 		return c.JSON(http.StatusOK, map[string]interface{}{"path": "", "error": err.Error()})
 	}
-
-	path := strings.TrimSpace(string(out))
 	return c.JSON(http.StatusOK, map[string]interface{}{"path": path})
 }
 

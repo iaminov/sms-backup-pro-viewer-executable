@@ -918,26 +918,9 @@ func HandleOpenMediaFolder(c echo.Context) error {
 	})
 }
 
-// HandleBrowseFolder opens a native Windows FolderBrowserDialog to pick a directory
+// HandleBrowseFolder opens the modern Windows Explorer folder picker (Save As / Open style) to pick a directory
 func HandleBrowseFolder(c echo.Context) error {
-	if runtime.GOOS != "windows" {
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"path": "",
-		})
-	}
-
-	script := `
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = "Select Folder to Save Extracted Media"
-$dialog.ShowNewFolderButton = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    Write-Output $dialog.SelectedPath
-}
-`
-	cmd := exec.Command("powershell", "-NoProfile", "-Sta", "-Command", script)
-	out, err := cmd.Output()
+	path, err := ShowModernFolderPicker("Select Folder to Save Extracted Media", "")
 	if err != nil {
 		slog.Warn("Failed to run folder browser dialog", "error", err)
 		return c.JSON(http.StatusOK, map[string]interface{}{
@@ -945,8 +928,6 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 			"error": err.Error(),
 		})
 	}
-
-	path := strings.TrimSpace(string(out))
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"path": path,
 	})
