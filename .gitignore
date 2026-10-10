@@ -9,6 +9,7 @@ test-data/
 **/test-data/
 google-voice-data/
 **/google-voice-data/
+Conversation_Transcript_*.pdf
 
 # Backend databases & temporary files
 tmp/
